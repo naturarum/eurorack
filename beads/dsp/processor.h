@@ -33,7 +33,7 @@
 
 #include "beads/dsp/granular_processor.h"
 #include "beads/dsp/modulated_parameter.h"
-#include "beads/dsp/fx/reverb.h"
+#include "beads/dsp/fx/morph_reverb.h"
 #include "beads/dsp/fx/wow_and_flutter.h"
 
 // Setting this flag slows down the codec to 24kHz for the MEDIA_DIRTY_TAPE
@@ -67,6 +67,7 @@ class Processor {
     float dry_wet;
     float reverb_amount;
     bool output_gate;
+    ReverbParameters reverb;
   };
   
   void Init(uint8_t* buffers[], uint16_t* reverb_buffer);
@@ -201,7 +202,7 @@ class Processor {
   float wet_;
   
   WowAndFlutter wow_and_flutter_;
-  Reverb reverb_;
+  MorphReverb reverb_;
   Limiter pre_reverb_limiter_;
   Limiter output_limiter_;
   

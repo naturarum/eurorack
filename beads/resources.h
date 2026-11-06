@@ -48,14 +48,9 @@ extern const int16_t* lookup_table_i16_table[];
 
 extern const int8_t* lookup_table_i8_table[];
 
-extern const int16_t* wavetables_table[];
-
 extern const float lut_sine[];
-extern const int16_t wav_integrated_waves[];
 #define LUT_SINE 0
 #define LUT_SINE_SIZE 1281
-#define WAV_INTEGRATED_WAVES 0
-#define WAV_INTEGRATED_WAVES_SIZE 49920
 
 }  // namespace beads
 

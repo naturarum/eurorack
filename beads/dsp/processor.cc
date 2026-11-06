@@ -229,17 +229,11 @@ void Processor::Process(
   
   pre_reverb_limiter_.Process(out, size);
   
-  // Reverb.
-  const bool caveman = media_ != MEDIA_DIGITAL;
+  // Reverb. The knob sets the amount only: decay, tone and the rest come
+  // from the shift layer.
   const float reverb = mix_parameters.reverb_amount;
-  const float reverb_mix = reverb * reverb * 0.9f;
-  const float reverb_time = reverb * reverb * reverb;
-  reverb_.set_mix(reverb_mix);
-  reverb_.set_time(caveman
-      ? (0.45f + 0.5f * reverb_time)
-      : (0.3f + 0.6f * reverb_time));
-  reverb_.set_lp(
-      caveman ? 0.4f : (media_ == MEDIA_VINTAGE_DIGITAL ? 0.75f : 0.6f));
+  reverb_.set_amount(reverb * reverb * 0.9f);
+  reverb_.set_parameters(mix_parameters.reverb);
   reverb_.Process(out, size);
   
   // Final clipping/limiting

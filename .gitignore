@@ -45,3 +45,6 @@ build
 *_BETA.sch
 *_beta.brd
 *_BETA.brd
+
+# Flash dumps of the modules (make -f beads/makefile image_all)
+beads_full*.bin

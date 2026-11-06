@@ -92,8 +92,7 @@ class PotChannel {
   
   enum Law {
     LAW_NORMAL,
-    LAW_ATTENUVERTER,
-    LAW_DETUNE
+    LAW_ATTENUVERTER
   };
   
   void Init(Law law, float lp_coefficient, float hysteresis) {
@@ -111,25 +110,29 @@ class PotChannel {
       v -= 0.5f;
       v = (2.0f / 0.47f) * v * std::max(fabsf(v) - 0.03f, 0.0f);
       // v = v * v * v * 8.0f;
-    } else if (law_ == LAW_DETUNE) {
-      float detune = 2.0f * v - 1.0f;
-      float sign = detune < 0.0f ? -1.0f : 1.0f;
-      detune = detune * sign * 6.0f;
-      MAKE_INTEGRAL_FRACTIONAL(detune);
-      
-      const float intervals[8] = {
-        0.0f, 1.0f, 3.0f, 4.0f, 7.0f, 12.0f, 24.0f, 24.0f
-      };
-      
-      detune_fractional = std::max(
-          (detune_fractional - 0.33333333f) * 1.5f, 0.0f);
-  
-      float a = intervals[detune_integral];
-      float b = intervals[detune_integral + 1];
-      v = stmlib::Crossfade(a, b, stmlib::SmoothStep(detune_fractional)) * sign;
     }
     ONE_POLE(lp_, v, lp_coefficient_);
     hysteresis_filter_.Process(lp_);
+  }
+  
+  // Law of the pitch knob: position to semitones, with flat spots on the
+  // usual intervals. Applied after the shift layer, which needs positions.
+  static float Detune(float position) {
+    float detune = 2.0f * position - 1.0f;
+    float sign = detune < 0.0f ? -1.0f : 1.0f;
+    detune = detune * sign * 6.0f;
+    MAKE_INTEGRAL_FRACTIONAL(detune);
+    
+    const float intervals[8] = {
+      0.0f, 1.0f, 3.0f, 4.0f, 7.0f, 12.0f, 24.0f, 24.0f
+    };
+    
+    detune_fractional = std::max(
+        (detune_fractional - 0.33333333f) * 1.5f, 0.0f);
+
+    float a = intervals[detune_integral];
+    float b = intervals[detune_integral + 1];
+    return stmlib::Crossfade(a, b, stmlib::SmoothStep(detune_fractional)) * sign;
   }
   
   inline float value() const { return hysteresis_filter_.value(); }

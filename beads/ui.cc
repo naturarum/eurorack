@@ -49,6 +49,15 @@ const uint32_t Ui::long_press_duration[SWITCH_LAST] = {
   4000, 4000, 1500, 0x7fffffff
 };
 
+// Reverb setting edited by each large knob while MEDIA is held.
+const ReverbSetting kShiftedReverbSetting[Ui::MAIN_PARAMETER_LAST] = {
+  REVERB_SETTING_DECAY,  // TIME
+  REVERB_SETTING_SIZE,  // SIZE
+  REVERB_SETTING_CHARACTER,  // SHAPE
+  REVERB_SETTING_TONE,  // PITCH
+  REVERB_SETTING_DIFFUSION  // DENSITY
+};
+
 void Ui::Init(
     Settings* settings,
     GainControl* gain_control,
@@ -84,6 +93,27 @@ void Ui::Init(
   for (int i = 0; i < MIX_PARAMETER_LAST; ++i) {
     assignable_cv_pot_[i].Init(1.0f, 0.0f);
   }
+  for (int i = 0; i < MAIN_PARAMETER_LAST; ++i) {
+    main_pot_[i].Init(1.0f, 0.0f);
+  }
+  displayed_reverb_setting_ = -1;
+}
+
+void Ui::LockMainPots() {
+  for (int i = 0; i < MAIN_PARAMETER_LAST; ++i) {
+    main_pot_[i].Lock();
+  }
+  displayed_reverb_setting_ = -1;
+}
+
+bool Ui::UnlockMainPots() {
+  bool edited = false;
+  for (int i = 0; i < MAIN_PARAMETER_LAST; ++i) {
+    edited = edited || main_pot_[i].editing_hidden_parameter();
+    main_pot_[i].Unlock();
+  }
+  displayed_reverb_setting_ = -1;
+  return edited;
 }
 
 void Ui::Poll() {
@@ -132,6 +162,21 @@ void Ui::Poll() {
     }
   }
   
+  for (int i = 0; i < MAIN_PARAMETER_LAST; ++i) {
+    PotController* p = &main_pot_[i];
+    p->ProcessUIRate();
+    if (p->editing_hidden_parameter() && switches_.pressed(SWITCH_MEDIA)) {
+      // Same hack as for the manual gain.
+      press_time_[SWITCH_MEDIA] = system_clock.milliseconds();
+      float value = p->hidden_parameter();
+      CONSTRAIN(value, 0.0f, 1.0f);
+      ReverbSetting setting = kShiftedReverbSetting[i];
+      settings_->mutable_state()->reverb[setting] = \
+          static_cast<uint8_t>(value * 255.0f + 0.5f);
+      displayed_reverb_setting_ = setting;
+    }
+  }
+  
   UpdateLeds();
 }
 
@@ -151,6 +196,8 @@ void Ui::UpdateLeds() {
 
   bool adjusting_manual_gain = switches_.pressed(SWITCH_MEDIA) && \
       assignable_cv_pot_[MIX_PARAMETER_FEEDBACK].editing_hidden_parameter();
+  bool adjusting_reverb = switches_.pressed(SWITCH_MEDIA) && \
+      displayed_reverb_setting_ != -1;
   
   switch (mode_) {
     case MODE_PANIC:
@@ -185,6 +232,9 @@ void Ui::UpdateLeds() {
         
         if (adjusting_manual_gain) {
           leds_.set_meter(0.05f + 0.95f * float(state.gain) / 256.0f);
+        } else if (adjusting_reverb) {
+          float value = float(state.reverb[displayed_reverb_setting_]) / 255.0f;
+          leds_.set_meter(0.05f + 0.95f * value);
         } else {
           Leds::Color media_color = media_palette_[state.media];
           const float brightness = overwrite_reserve_ * \
@@ -295,6 +345,7 @@ void Ui::OnSwitchPressed(const Event& e) {
     state->monophonic_mode = !state->monophonic_mode;
     settings_->SaveState();
     assignable_cv_pot_[0].Unlock();
+    UnlockMainPots();
     ignore_release_[SWITCH_MEDIA] = ignore_release_[SWITCH_SEED] = true;
     return;
   }
@@ -308,6 +359,7 @@ void Ui::OnSwitchPressed(const Event& e) {
     trim_flag_ = true;
     freeze_button_state_ = false;
     assignable_cv_pot_[0].Unlock();
+    UnlockMainPots();
     ignore_release_[SWITCH_MEDIA] = ignore_release_[SWITCH_FREEZE] = true;
     return;
   }
@@ -324,6 +376,7 @@ void Ui::OnSwitchPressed(const Event& e) {
     for (int i = 0; i < MIX_PARAMETER_LAST; ++i) {
       assignable_cv_pot_[i].Unlock();
     }
+    UnlockMainPots();
     ignore_release_[SWITCH_MEDIA] = ignore_release_[SWITCH_ASSIGN] = true;
     return;
   }
@@ -342,6 +395,10 @@ void Ui::OnSwitchPressed(const Event& e) {
       
     case SWITCH_MEDIA:
       assignable_cv_pot_[0].Lock();
+      // During calibration, MEDIA only steps through the procedure.
+      if (mode_ < MODE_CALIBRATION_1 || mode_ > MODE_CALIBRATION_4) {
+        LockMainPots();
+      }
       break;
       
     case SWITCH_ASSIGN:
@@ -401,8 +458,15 @@ void Ui::OnSwitchReleased(const Event& e) {
 
     case SWITCH_MEDIA:
       {
-        if (!assignable_cv_pot_[0].editing_hidden_parameter()) {
-          if (mode_ >= MODE_CALIBRATION_1 && mode_ <= MODE_CALIBRATION_4) {
+        const bool calibrating = mode_ >= MODE_CALIBRATION_1 && \
+            mode_ <= MODE_CALIBRATION_4;
+        bool reverb_edited = false;
+        if (!calibrating) {
+          reverb_edited = UnlockMainPots();
+        }
+        if (!assignable_cv_pot_[0].editing_hidden_parameter() &&
+            !reverb_edited) {
+          if (calibrating) {
             NextCalibrationStep();
           } else {
             if (uint32_t(e.data) >= long_press_duration[SWITCH_MEDIA]) {
@@ -419,7 +483,7 @@ void Ui::OnSwitchReleased(const Event& e) {
             }
           }
         } else {
-          // Save the manual gain settings.
+          // Save the manual gain or reverb settings.
           settings_->SaveState();
         }
         assignable_cv_pot_[0].Unlock();

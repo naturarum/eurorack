@@ -47,6 +47,16 @@ struct PersistentData {
   enum { tag = 0x494C4143 };  // CALI
 };
 
+// Reverb controls of the shift layer, stored in State.
+enum ReverbSetting {
+  REVERB_SETTING_CHARACTER,
+  REVERB_SETTING_SIZE,
+  REVERB_SETTING_DECAY,
+  REVERB_SETTING_TONE,
+  REVERB_SETTING_DIFFUSION,
+  REVERB_SETTING_LAST
+};
+
 struct State {
   uint8_t media;
   uint8_t assignable_cv_destination;
@@ -56,7 +66,9 @@ struct State {
   uint8_t frozen;
   uint8_t disable_autosave;
   uint8_t monophonic_mode;
-  uint8_t padding[14];
+  uint8_t reverb[REVERB_SETTING_LAST];
+  uint8_t reverb_version;  // 0 when saved by a firmware without the above.
+  uint8_t padding[8];
   enum { tag = 0x54415453 };  // STAT
 };
 

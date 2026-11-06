@@ -45,8 +45,6 @@ void CvReader::Init(const Settings* settings) {
     if (i >= POTS_ADC_CHANNEL_TIME_AMOUNT && \
         i <= POTS_ADC_CHANNEL_PITCH_AMOUNT) {
       law = PotChannel::LAW_ATTENUVERTER;
-    } else if (i == POTS_ADC_CHANNEL_PITCH) {
-      law = PotChannel::LAW_DETUNE;
     }
     pot_channel_[i].Init(
         law,

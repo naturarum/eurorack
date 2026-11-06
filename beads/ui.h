@@ -72,6 +72,16 @@ class Ui {
     MIX_PARAMETER_LAST,
   };
   
+  // The large knobs. While MEDIA is held they edit the reverb instead.
+  enum MainParameter {
+    MAIN_PARAMETER_TIME,
+    MAIN_PARAMETER_SIZE,
+    MAIN_PARAMETER_SHAPE,
+    MAIN_PARAMETER_PITCH,
+    MAIN_PARAMETER_DENSITY,
+    MAIN_PARAMETER_LAST
+  };
+  
   void Init(
       Settings* settings,
       GainControl* gain_control,
@@ -138,6 +148,14 @@ class Ui {
     assignable_cv_pot_[parameter].ProcessControlRate(value);
   }
   
+  inline float main_parameter(MainParameter parameter) const {
+    return main_pot_[parameter].main_parameter();
+  }
+  
+  void ProcessMainPot(MainParameter parameter, float value) {
+    main_pot_[parameter].ProcessControlRate(value);
+  }
+  
   inline const Switches& switches() const {
     return switches_;
   }
@@ -160,6 +178,9 @@ class Ui {
 
   void UpdateLeds();
   void NextCalibrationStep();
+  void LockMainPots();
+  // Returns true if one of them was editing the reverb.
+  bool UnlockMainPots();
 
   stmlib::EventQueue<16> queue_;
 
@@ -186,6 +207,8 @@ class Ui {
   BackgroundBufferBackup* background_buffer_backup_;
   
   PotController assignable_cv_pot_[MIX_PARAMETER_LAST];
+  PotController main_pot_[MAIN_PARAMETER_LAST];
+  int displayed_reverb_setting_;
 
   static const Leds::Color media_palette_[4];
   

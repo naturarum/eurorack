@@ -30,13 +30,13 @@
 #include "beads/calibrator.h"
 #include "beads/cv_reader.h"
 #include "beads/drivers/codec.h"
+#include "beads/drivers/cycle_counter.h"
 #include "beads/drivers/debug_pin.h"
 #include "beads/drivers/freeze_input.h"
 #include "beads/drivers/seed_input.h"
 #include "beads/drivers/system.h"
 #include "beads/drivers/watchdog.h"
 #include "beads/dsp/processor.h"
-#include "beads/dsp/synth.h"
 #include "beads/factory_test.h"
 #include "beads/gain_control.h"
 #include "beads/normalization_detector.h"
@@ -66,10 +66,35 @@ NormalizationDetector normalization_detector;
 Processor processor;
 SeedInput seed_input;
 Settings settings;
-Synth synth;
 Ui ui;
 
 volatile bool ready = false;
+
+// Load of the audio interrupt, in CPU cycles per block: 100000 cycles is the
+// whole budget (400 MHz, 4000 blocks per second). Read over SWD while the
+// module runs, with "make -f beads/makefile cpu_load".
+struct CpuLoad {
+  uint32_t last;
+  uint32_t peak;
+};
+volatile CpuLoad cpu_load;
+
+class ScopedCpuLoadMeter {
+ public:
+  ScopedCpuLoadMeter() : start_(CycleCounter::value()) { }
+  ~ScopedCpuLoadMeter() {
+    uint32_t elapsed = CycleCounter::value() - start_;
+    cpu_load.last = elapsed;
+    if (elapsed > cpu_load.peak) {
+      cpu_load.peak = elapsed;
+    }
+  }
+  
+ private:
+  uint32_t start_;
+  
+  DISALLOW_COPY_AND_ASSIGN(ScopedCpuLoadMeter);
+};
 
 // #define PROFILE_INTERRUPT
 
@@ -95,8 +120,10 @@ void SysTick_Handler() {
 // the AGC while the normalization detection system is still catching up with
 // a codec restart.
 int codec_transition_frames;
-bool synth_mode;
-int synth_mode_start_time;
+
+// Set at boot, until the main loop configures the processor and starts the
+// codec for the first time.
+bool codec_stopped;
 
 GateFlags previous_seed;
 stmlib::DelayLine<Codec::Event, 256> event_delay;
@@ -109,6 +136,7 @@ void Process(
 #ifdef PROFILE_INTERRUPT
   ScopedDebugPinToggler toggler;
 #endif  // PROFILE_INTERRUPT
+  ScopedCpuLoadMeter cpu_load_meter;
   FloatFrame float_in[kMaxCodecBlockSize];
   FloatFrame float_out[kMaxCodecBlockSize];
   bool freeze[kMaxCodecBlockSize];
@@ -127,6 +155,18 @@ void Process(
     ui.ProcessPot(
         Ui::MixParameter(i),
         cv_reader.pot(PotsAdcChannel(POTS_ADC_CHANNEL_FEEDBACK + i)));
+  }
+  const PotsAdcChannel main_pot_channel[Ui::MAIN_PARAMETER_LAST] = {
+    POTS_ADC_CHANNEL_TIME,
+    POTS_ADC_CHANNEL_SIZE,
+    POTS_ADC_CHANNEL_SHAPE,
+    POTS_ADC_CHANNEL_PITCH,
+    POTS_ADC_CHANNEL_DENSITY
+  };
+  for (int i = 0; i < Ui::MAIN_PARAMETER_LAST; ++i) {
+    ui.ProcessMainPot(
+        Ui::MainParameter(i),
+        cv_reader.pot(main_pot_channel[i]));
   }
   
   // Conversion of events into the right format.
@@ -153,7 +193,7 @@ void Process(
     previous_seed = GATE_FLAG_LOW;
   }
   ui.set_seed_led_state(seed_block && !codec_transition_frames);
-  ui.set_overwrite_reserve(synth_mode ? 1.0f : processor.overwrite_reserve());
+  ui.set_overwrite_reserve(processor.overwrite_reserve());
   
   // Conversion of input samples into floats, (with automatic gain control).
   gain_control.Process(
@@ -176,25 +216,26 @@ void Process(
   }
   
   Parameters p;
-  p.time.base = cv_reader.pot(POTS_ADC_CHANNEL_TIME);
+  p.time.base = ui.main_parameter(Ui::MAIN_PARAMETER_TIME);
   p.time.attenuverter = cv_reader.pot(POTS_ADC_CHANNEL_TIME_AMOUNT);
   p.time.has_cv = !normalization_detector.normalized(
       NORMALIZATION_DETECTOR_CHANNEL_TIME_CV);
   p.time.cv = cv_reader.cv(CV_ADC_CHANNEL_TIME);
   
-  p.size.base = cv_reader.pot(POTS_ADC_CHANNEL_SIZE);
+  p.size.base = ui.main_parameter(Ui::MAIN_PARAMETER_SIZE);
   p.size.attenuverter = cv_reader.pot(POTS_ADC_CHANNEL_SIZE_AMOUNT);
   p.size.has_cv = !normalization_detector.normalized(
       NORMALIZATION_DETECTOR_CHANNEL_SIZE_CV);
   p.size.cv = cv_reader.cv(CV_ADC_CHANNEL_SIZE);
 
-  p.shape.base = cv_reader.pot(POTS_ADC_CHANNEL_SHAPE);
+  p.shape.base = ui.main_parameter(Ui::MAIN_PARAMETER_SHAPE);
   p.shape.attenuverter = cv_reader.pot(POTS_ADC_CHANNEL_SHAPE_AMOUNT);
   p.shape.has_cv = !normalization_detector.normalized(
       NORMALIZATION_DETECTOR_CHANNEL_SHAPE_CV);
   p.shape.cv = cv_reader.cv(CV_ADC_CHANNEL_SHAPE);
   
-  p.pitch.base = cv_reader.pot(POTS_ADC_CHANNEL_PITCH);
+  p.pitch.base = PotChannel::Detune(
+      ui.main_parameter(Ui::MAIN_PARAMETER_PITCH));
   p.pitch.attenuverter = cv_reader.pot(POTS_ADC_CHANNEL_PITCH_AMOUNT);
   p.pitch.has_cv = !normalization_detector.normalized(
       NORMALIZATION_DETECTOR_CHANNEL_PITCH_CV);
@@ -207,7 +248,7 @@ void Process(
 #endif  // ENABLE_ADVANCED_FEATURES
 
   ModulatedParameter d;
-  d.base = cv_reader.pot(POTS_ADC_CHANNEL_DENSITY);
+  d.base = ui.main_parameter(Ui::MAIN_PARAMETER_DENSITY);
   d.cv = cv_reader.cv(CV_ADC_CHANNEL_DENSITY);
   if (normalization_detector.normalized(
       NORMALIZATION_DETECTOR_CHANNEL_DENSITY_CV)) {
@@ -232,6 +273,13 @@ void Process(
   m.dry_wet = mix_parameter[Ui::MIX_PARAMETER_DRY_WET];
   m.reverb_amount = mix_parameter[Ui::MIX_PARAMETER_REVERB];
   m.output_gate = settings.state().gate_output_mode;
+  
+  const uint8_t* reverb = settings.state().reverb;
+  m.reverb.character = float(reverb[REVERB_SETTING_CHARACTER]) / 255.0f;
+  m.reverb.size = float(reverb[REVERB_SETTING_SIZE]) / 255.0f;
+  m.reverb.decay = float(reverb[REVERB_SETTING_DECAY]) / 255.0f;
+  m.reverb.tone = float(reverb[REVERB_SETTING_TONE]) / 255.0f;
+  m.reverb.diffusion = float(reverb[REVERB_SETTING_DIFFUSION]) / 255.0f;
 
   SeedButtonState seed_button_state = ui.seed_button_locked()
       ? SEED_BUTTON_STATE_LOCKED
@@ -241,23 +289,13 @@ void Process(
     processor.Trim();
     ui.ClearTrimFlag();
   }
-  if (synth_mode) {
-    synth.Render(
-        seed_button_state,
-        seed_input,
-        freeze,
-        Synth::Resolution(settings.state().media),
-        d, p, m,
-        float_out, size);
-  } else {
-    processor.Process(
-        seed_button_state,
-        seed_input,
-        freeze,
-        d, p, m,
-        float_in,
-        float_out, size);
-  }
+  processor.Process(
+      seed_button_state,
+      seed_input,
+      freeze,
+      d, p, m,
+      float_in,
+      float_out, size);
   
   // Conversion of output samples into integers.
   for (size_t i = 0; i < size; ++i) {
@@ -265,18 +303,14 @@ void Process(
     float r = float_out[i].r;
     CONSTRAIN(l, -1.0f, 0.999999f);
     CONSTRAIN(r, -1.0f, 0.999999f);
-    if (fabsf(l) > 0.01f || fabsf(r) > 0.01f) {
-      synth_mode_start_time = 0;
-    }
     out[i].l = static_cast<int32_t>(l * 2147483648.0f);
     out[i].r = static_cast<int32_t>(r * 2147483648.0f);
   }
 }
 
-void ConfigureAndStartCodec(bool new_synth_mode, bool reset_gain_control) {
-  int sr = new_synth_mode ? 48000 : int(processor.sample_rate());
-  synth_mode = new_synth_mode;
-  synth_mode_start_time = 0;
+void ConfigureAndStartCodec(bool reset_gain_control) {
+  int sr = int(processor.sample_rate());
+  codec_stopped = false;
 
   gain_control.Init(
       float(sr),
@@ -298,6 +332,7 @@ void Init() {
   sys.Init(true);
 
   Watchdog::Start();
+  CycleCounter::Init();
   freeze_input.Init();
   seed_input.Init();
   codec.Init();
@@ -311,7 +346,6 @@ void Init() {
   delay_buffers[2] = delay_buffer_2;
   
   processor.Init(delay_buffers, reverb_buffer);
-  synth.Init(reverb_buffer);
   background_buffer_backup.Init(&processor, &settings);
 
   ui.Init(&settings, &gain_control, &calibrator, &background_buffer_backup);
@@ -336,61 +370,48 @@ void Init() {
     DebugPin::Init();
 #endif  // PROFILE_INTERRUPT
     ui.set_factory_test(false);
-    synth_mode_start_time = 0;
-    synth_mode = true;
+    codec_stopped = true;
   }
   ready = true;
   
   bool was_frozen = background_buffer_backup.Load();
   if (was_frozen) {
     ui.set_freeze_button_state(was_frozen);
-    ConfigureAndStartCodec(false, true);
+    ConfigureAndStartCodec(true);
   }
 }
 
 void MonitorStateChange() {
   if (ui.should_ignore_state_change() || codec_transition_frames) {
-    synth_mode_start_time = 0;
     return;
   }
   
+  // With nothing patched in the audio inputs, the mono detection means
+  // nothing: keep the current configuration until a source is plugged in.
   if (normalization_detector.no_input()) {
-    if (!synth_mode) {
-      if (!synth_mode_start_time) {
-        synth_mode_start_time = system_clock.milliseconds();
-        if (!synth_mode_start_time) synth_mode_start_time = 1;
-      } else {
-        if ((system_clock.milliseconds() - synth_mode_start_time) >= 10000) {
-          // If 10 seconds have elapsed with nothing patched in the audio
-          // inputs, enable the synth mode.
-          codec.Stop();
-          ConfigureAndStartCodec(true, true);
-        }
-      }
-    }
-  } else {
-    // Awful block of code to troubleshoot glitches related to changes of
-    // sample rate and more general codec settings.
-    //
-    // static uint32_t elapsed = 0;
-    // bool autoreset = (system_clock.milliseconds() - elapsed) >= 400;
-    // if (autoreset) {
-    //   settings.mutable_state()->media = 
-    //       (settings.mutable_state()->media + 1) % 4;
-    // }
+    return;
+  }
 
-    Processor::Media media = Processor::Media(settings.state().media);
-    bool mono = normalization_detector.mono();
-    bool media_changed = media != processor.media();
-    bool mono_changed = mono != processor.mono();
-    
-    if (synth_mode || mono_changed || media_changed) {
-      // elapsed = system_clock.milliseconds();
-      codec.Stop();
-      processor.Configure(media, mono);
-      ConfigureAndStartCodec(false, mono_changed || synth_mode);
-    }
-    synth_mode_start_time = 0;
+  // Awful block of code to troubleshoot glitches related to changes of
+  // sample rate and more general codec settings.
+  //
+  // static uint32_t elapsed = 0;
+  // bool autoreset = (system_clock.milliseconds() - elapsed) >= 400;
+  // if (autoreset) {
+  //   settings.mutable_state()->media =
+  //       (settings.mutable_state()->media + 1) % 4;
+  // }
+
+  Processor::Media media = Processor::Media(settings.state().media);
+  bool mono = normalization_detector.mono();
+  bool media_changed = media != processor.media();
+  bool mono_changed = mono != processor.mono();
+
+  if (codec_stopped || mono_changed || media_changed) {
+    // elapsed = system_clock.milliseconds();
+    codec.Stop();
+    processor.Configure(media, mono);
+    ConfigureAndStartCodec(mono_changed || codec_stopped);
   }
 }
 
@@ -400,7 +421,7 @@ int main(void) {
   while (1) {
     ui.DoEvents();
     MonitorStateChange();
-    if (!synth_mode) {
+    if (!codec_stopped) {
       background_buffer_backup.Process(ui.freeze_led_state());
     }
     processor.WasteCPUCycles(16);

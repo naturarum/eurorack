@@ -6,7 +6,6 @@ TARGET         = beads_test
 BUILD_ROOT     = build/
 BUILD_DIR      = $(BUILD_ROOT)$(TARGET)/
 CC_FILES       = 		processor.cc \
-		synth.cc \
 		beads_test.cc \
 		mu_law.cc \
 		random.cc \

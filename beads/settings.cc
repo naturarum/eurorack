@@ -37,6 +37,19 @@ namespace beads {
 
 using namespace std;
 
+// The reverb settings took bytes from the padding: the size of State must
+// not change, or the settings saved on the module would not be found.
+STATIC_ASSERT(sizeof(State) == 24, state_size_changed);
+
+const uint8_t kReverbVersion = 1;
+const uint8_t kDefaultReverb[REVERB_SETTING_LAST] = {
+  128,  // Character: hall.
+  128,  // Size.
+  128,  // Decay: about 3.3 s.
+  140,  // Tone.
+  204   // Diffusion.
+};
+
 #define FIX_OUTLIER(destination, expected_value) if (fabsf(destination / expected_value - 1.0f) > 0.25f) { destination = expected_value; }
 #define FIX_OUTLIER_ABSOLUTE(destination, expected_value) if (fabsf(destination - expected_value) > 0.1f) { destination = expected_value; }
 
@@ -67,6 +80,9 @@ bool Settings::Init(bool recovery_mode) {
   state_.frozen = 0;
   state_.disable_autosave = 0;
   state_.monophonic_mode = 0;
+  copy(&kDefaultReverb[0], &kDefaultReverb[REVERB_SETTING_LAST],
+       &state_.reverb[0]);
+  state_.reverb_version = kReverbVersion;
   
   if (recovery_mode) {
     chunk_storage_.Recover(&persistent_data_, &state_);
@@ -78,6 +94,11 @@ bool Settings::Init(bool recovery_mode) {
     // Sanitize settings read from flash.
     CONSTRAIN(state_.media, 0, 3);
     CONSTRAIN(state_.assignable_cv_destination, 0, 3);
+    if (state_.reverb_version != kReverbVersion) {
+      copy(&kDefaultReverb[0], &kDefaultReverb[REVERB_SETTING_LAST],
+           &state_.reverb[0]);
+      state_.reverb_version = kReverbVersion;
+    }
   }
   
   return success;

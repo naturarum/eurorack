@@ -68,7 +68,6 @@ includes = """
 """
 
 import lookup_tables
-import wavetables
 
 create_specialized_manager = True
 
@@ -79,7 +78,5 @@ resources = [
    'lookup_table_i16', 'LUT', 'int16_t', int, False),
   (lookup_tables.lookup_tables_i8,
    'lookup_table_i8', 'LUT', 'int8_t', int, False),
-  (wavetables.wavetables,
-   'wavetables', 'WAV', 'int16_t', int, False)
    
 ]
