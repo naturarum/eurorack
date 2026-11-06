@@ -1,3 +1,7 @@
+**This fork:** [Beads with a morphing reverb](beads/README.md) is unofficial Beads firmware. It replaces the plate reverb with one that moves from room through hall to spring, with all its settings on the panel, and installs by audio. ([Release](https://github.com/naturarum/eurorack/releases/tag/beads-reverb-v1))
+
+---
+
 Mutable Instruments' Eurorack Modules.
 
 * [Beads](http://mutable-instruments.net/modules/beads): Texture synthesizer (1).
