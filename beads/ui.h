@@ -140,6 +140,25 @@ class Ui {
     seed_led_state_ = seed_led_state;
   }
   
+#ifdef CPU_METER
+  // Peak load of the audio interrupt, 1 is the whole budget. Beta builds
+  // show it on the ASSIGN LEDs.
+  inline void set_cpu_load(float load) {
+    cpu_load_ = load;
+    if (load >= 1.0f) {
+      cpu_overrun_ = kCpuOverrunDisplayDuration;
+    }
+  }
+#endif  // CPU_METER
+
+  // In delay mode, the SEED LED flashes on every repeat.
+  inline void set_delay_state(bool delay_mode, bool pulse) {
+    delay_mode_ = delay_mode;
+    if (pulse) {
+      delay_pulse_ = kDelayPulseDuration;
+    }
+  }
+  
   inline void set_overwrite_reserve(float overwrite_reserve) {
     overwrite_reserve_ = overwrite_reserve;
   }
@@ -199,7 +218,17 @@ class Ui {
   bool seed_button_locked_;
   bool seed_led_state_;
   
+  static const int kDelayPulseDuration = 30;  // ms
+  bool delay_mode_;
+  volatile int delay_pulse_;
+  
   float overwrite_reserve_;
+
+#ifdef CPU_METER
+  static const int kCpuOverrunDisplayDuration = 1000;  // ms
+  float cpu_load_;
+  volatile int cpu_overrun_;
+#endif  // CPU_METER
   
   GainControl* gain_control_;
   Settings* settings_;

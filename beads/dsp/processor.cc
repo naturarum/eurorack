@@ -40,10 +40,19 @@ const float kDelayModeFadeTime = 0.75f;  // seconds
 using namespace std;
 using namespace stmlib;
 
+// The top quality is the only one that runs its grains at 48 kHz. With
+// 32 grains it leaves almost no time for the reverb, and long dense grains
+// with the reverb up overran the audio interrupt. With fewer voices, new
+// grains steal the oldest ones a little sooner, as the scheduler always does.
+#ifndef BEADS_TOP_QUALITY_VOICES
+#define BEADS_TOP_QUALITY_VOICES 24
+#endif  // BEADS_TOP_QUALITY_VOICES
+
 void Processor::Init(
     uint8_t* buffers[],
     uint16_t* reverb_buffer) {
   processor_digital_.Init(48000.0f, buffers);
+  processor_digital_.set_num_voices(BEADS_TOP_QUALITY_VOICES);
   processor_vintage_digital_.Init(32000.0f, buffers);
   processor_clean_tape_.Init(24000.0f, buffers);
   processor_dirty_tape_.Init(24000.0f, buffers);
@@ -64,6 +73,8 @@ void Processor::Init(
   
   // Used for the timing of the delay to granular transition.
   delay_mode_transition_ = -kDelayModeTransitionTime;
+  previous_delay_gate_ = false;
+  delay_pulse_ = false;
 }
 
 void Processor::Configure(Media media, bool mono) {
@@ -140,10 +151,16 @@ void Processor::Process(
         expo_fm_amount * density.cv,
         parameters.time,
         parameters.shape,
+        mix_parameters.feedback,
         taps,
         size);
     for (size_t i = 0; i < size; ++i) {
       gate_out[i] = taps[i].gate;
+      // The gate rises on every repeat of the main tap.
+      if (gate_out[i] && !previous_delay_gate_) {
+        delay_pulse_ = true;
+      }
+      previous_delay_gate_ = gate_out[i];
     }
   } else {
     taps = NULL;

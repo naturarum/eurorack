@@ -304,7 +304,7 @@ struct Setting {
 
 ReverbParameters Preset(
     float character, float size = 0.5f, float decay = 0.5f,
-    float tone = 0.55f, float diffusion = 0.8f) {
+    float tone = 0.55f, float diffusion = 0.5f) {
   ReverbParameters p;
   p.character = character;
   p.size = size;
@@ -362,7 +362,8 @@ float PeakAndCheck(const Signal& s, const char* name);
 
 Processor processor;
 
-// The whole Beads processor, dense grains, for a host CPU comparison.
+// The whole Beads processor, dense grains (SEED locked: free running), for a
+// host CPU comparison.
 double TimeProcessor(const Signal& in) {
   uint8_t* buffers[3] = {
     delay_buffer_1, delay_buffer_1 + 256 * 1024, delay_buffer_2
@@ -394,7 +395,7 @@ double TimeProcessor(const Signal& in) {
   auto start = chrono::steady_clock::now();
   for (size_t i = 0; i + kBlockSize <= in.size(); i += kBlockSize) {
     processor.Process(
-        SEED_BUTTON_STATE_OFF, NULL, freeze, d, p, m,
+        SEED_BUTTON_STATE_LOCKED, NULL, freeze, d, p, m,
         &in[i], &out[i], kBlockSize);
   }
   double elapsed = chrono::duration<double>(
@@ -524,15 +525,15 @@ int main(int argc, char** argv) {
   srand(1);
 
   morph.Init(reverb_buffer, kSampleRate);
-  printf("tank memory at 48 kHz: large pool %u / %u, small pool %u / %u "
-         "samples\n",
-         morph.memory_used(0), kReverbLargePoolSize,
-         morph.memory_used(1), kReverbSmallPoolSize);
-  if (morph.memory_used(0) > kReverbLargePoolSize ||
-      morph.memory_used(1) > kReverbSmallPoolSize) {
-    fprintf(stderr, "delay memory overflow\n");
-    return 1;
+  printf("delay memory at 48 kHz, in samples:");
+  for (size_t i = 0; i < kReverbNumPools; ++i) {
+    printf(" pool %zu %u / %u", i, morph.memory_used(i), kReverbPoolSize[i]);
+    if (morph.memory_used(i) > kReverbPoolSize[i]) {
+      fprintf(stderr, "\ndelay memory overflow\n");
+      return 1;
+    }
   }
+  printf("\n");
 
   const Setting settings[] = {
     { "01_room", Preset(0.0f) },
@@ -542,10 +543,11 @@ int main(int argc, char** argv) {
     { "05_spring", Preset(1.0f) },
     { "06_hall_huge_long", Preset(0.5f, 0.95f, 0.8f) },
     { "07_room_tiny", Preset(0.0f, 0.1f, 0.3f) },
-    { "08_spring_separate_springs", Preset(1.0f, 0.5f, 0.5f, 0.55f, 0.15f) },
+    { "08_spring_separate_springs", Preset(1.0f, 0.5f, 0.5f, 0.55f, 0.1f) },
     { "09_hall_no_diffusion_echoes", Preset(0.5f, 0.6f, 0.5f, 0.55f, 0.0f) },
     { "10_hall_dark", Preset(0.5f, 0.6f, 0.55f, 0.05f) },
     { "11_hall_bright", Preset(0.5f, 0.6f, 0.55f, 0.95f) },
+    { "12_hall_wash", Preset(0.5f, 0.6f, 0.55f, 0.55f, 1.0f) },
   };
   const size_t num_settings = sizeof(settings) / sizeof(settings[0]);
 
@@ -613,7 +615,7 @@ int main(int argc, char** argv) {
     morph.Init(reverb_buffer, kSampleRate);
     Signal ir = click;
     for (size_t i = 0; i < ir.size(); i += kBlockSize) {
-      morph.set_parameters(Preset(1.0f, 0.5f, 0.5f, 0.55f, 0.15f));
+      morph.set_parameters(Preset(1.0f, 0.5f, 0.5f, 0.55f, 0.1f));
       morph.set_amount(1.0f);
       morph.Process(&ir[i], min(kBlockSize, ir.size() - i));
     }

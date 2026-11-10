@@ -49,6 +49,10 @@ const uint32_t Ui::long_press_duration[SWITCH_LAST] = {
   4000, 4000, 1500, 0x7fffffff
 };
 
+// The REVERB knob edits the ducking depth while MEDIA is held. It is shown
+// on the meter like the reverb settings, with this index.
+const int kDisplayDucking = REVERB_SETTING_LAST;
+
 // Reverb setting edited by each large knob while MEDIA is held.
 const ReverbSetting kShiftedReverbSetting[Ui::MAIN_PARAMETER_LAST] = {
   REVERB_SETTING_DECAY,  // TIME
@@ -86,6 +90,12 @@ void Ui::Init(
   seed_button_state_ = false;
   seed_button_locked_ = true;
   seed_led_state_ = false;
+  delay_mode_ = false;
+  delay_pulse_ = 0;
+#ifdef CPU_METER
+  cpu_load_ = 0.0f;
+  cpu_overrun_ = 0;
+#endif  // CPU_METER
   trim_flag_ = false;
   
   overwrite_reserve_ = 1.0f;
@@ -119,6 +129,14 @@ bool Ui::UnlockMainPots() {
 void Ui::Poll() {
   system_clock.Tick();
   switches_.Debounce();
+  if (delay_pulse_) {
+    --delay_pulse_;
+  }
+#ifdef CPU_METER
+  if (cpu_overrun_) {
+    --cpu_overrun_;
+  }
+#endif  // CPU_METER
   
   for (int i = 0; i < SWITCH_LAST; ++i) {
     Switch s = Switch(i);
@@ -154,7 +172,14 @@ void Ui::Poll() {
       if (switches_.pressed(SWITCH_MEDIA)) {
         // Big hack to prevent the long press detection to fire!
         press_time_[SWITCH_MEDIA] = system_clock.milliseconds();
-        state->gain = 1.0f + p->hidden_parameter() * 255.0f;
+        if (i == MIX_PARAMETER_FEEDBACK) {
+          state->gain = 1.0f + p->hidden_parameter() * 255.0f;
+        } else if (i == MIX_PARAMETER_REVERB) {
+          float value = p->hidden_parameter();
+          CONSTRAIN(value, 0.0f, 1.0f);
+          state->reverb_ducking = static_cast<uint8_t>(value * 255.0f + 0.5f);
+          displayed_reverb_setting_ = kDisplayDucking;
+        }
       } else if (switches_.pressed(SWITCH_ASSIGN)) {
         state->assignable_cv_destination = 3;
         state->assignable_cv_amount[i] = p->hidden_parameter() * 256.0f;
@@ -233,7 +258,9 @@ void Ui::UpdateLeds() {
         if (adjusting_manual_gain) {
           leds_.set_meter(0.05f + 0.95f * float(state.gain) / 256.0f);
         } else if (adjusting_reverb) {
-          float value = float(state.reverb[displayed_reverb_setting_]) / 255.0f;
+          float value = float(displayed_reverb_setting_ == kDisplayDucking
+              ? state.reverb_ducking
+              : state.reverb[displayed_reverb_setting_]) / 255.0f;
           leds_.set_meter(0.05f + 0.95f * value);
         } else {
           Leds::Color media_color = media_palette_[state.media];
@@ -251,7 +278,15 @@ void Ui::UpdateLeds() {
                   : 0);
         }
         
-        if (seed_button_locked_) {
+        if (delay_mode_) {
+          // A flash on every repeat. Between flashes, dim when the delay
+          // runs free (SEED locked), off when it follows taps or a clock.
+          int brightness = seed_button_locked_ ? 24 : 0;
+          if (delay_pulse_ || seed_button_state_ || seed_led_state_) {
+            brightness = 255;
+          }
+          leds_.set(LED_SEED, brightness);
+        } else if (seed_button_locked_) {
           leds_.set(LED_SEED, (triangle * 3 >> 2) + 64);
         } else {
           leds_.set(
@@ -259,6 +294,23 @@ void Ui::UpdateLeds() {
               (seed_button_state_ || seed_led_state_) ? 255 : 0);
         }
         
+#ifdef CPU_METER
+        // Beta builds: the peak load of the audio interrupt as a bar on the
+        // three ASSIGN LEDs, from 70% (all off) to 100% (all on), 10% per
+        // LED. All three blink for a second after the budget was exceeded.
+        if (cpu_overrun_) {
+          const uint8_t blink = (system_clock.milliseconds() & 64) ? 255 : 0;
+          for (int i = 0; i < 3; ++i) {
+            leds_.set(Led(LED_ASSIGN_1 + i), blink);
+          }
+        } else {
+          for (int i = 0; i < 3; ++i) {
+            float level = (cpu_load_ - 0.7f - 0.1f * float(i)) * 10.0f;
+            CONSTRAIN(level, 0.0f, 1.0f);
+            leds_.set(Led(LED_ASSIGN_1 + i), uint8_t(level * 255.0f));
+          }
+        }
+#else
         if (state.assignable_cv_destination == 3) {
           for (int i = 0; i < MIX_PARAMETER_LAST; ++i) {
             leds_.set(
@@ -268,6 +320,7 @@ void Ui::UpdateLeds() {
         } else {
           leds_.set(Led(LED_ASSIGN_1 + state.assignable_cv_destination), 128);
         }
+#endif  // CPU_METER
       }
       break;
       
@@ -344,7 +397,8 @@ void Ui::OnSwitchPressed(const Event& e) {
     State* state = settings_->mutable_state();
     state->monophonic_mode = !state->monophonic_mode;
     settings_->SaveState();
-    assignable_cv_pot_[0].Unlock();
+    assignable_cv_pot_[MIX_PARAMETER_FEEDBACK].Unlock();
+    assignable_cv_pot_[MIX_PARAMETER_REVERB].Unlock();
     UnlockMainPots();
     ignore_release_[SWITCH_MEDIA] = ignore_release_[SWITCH_SEED] = true;
     return;
@@ -358,7 +412,8 @@ void Ui::OnSwitchPressed(const Event& e) {
       e.control_id == SWITCH_FREEZE) {
     trim_flag_ = true;
     freeze_button_state_ = false;
-    assignable_cv_pot_[0].Unlock();
+    assignable_cv_pot_[MIX_PARAMETER_FEEDBACK].Unlock();
+    assignable_cv_pot_[MIX_PARAMETER_REVERB].Unlock();
     UnlockMainPots();
     ignore_release_[SWITCH_MEDIA] = ignore_release_[SWITCH_FREEZE] = true;
     return;
@@ -394,9 +449,10 @@ void Ui::OnSwitchPressed(const Event& e) {
       break;
       
     case SWITCH_MEDIA:
-      assignable_cv_pot_[0].Lock();
+      assignable_cv_pot_[MIX_PARAMETER_FEEDBACK].Lock();
       // During calibration, MEDIA only steps through the procedure.
       if (mode_ < MODE_CALIBRATION_1 || mode_ > MODE_CALIBRATION_4) {
+        assignable_cv_pot_[MIX_PARAMETER_REVERB].Lock();
         LockMainPots();
       }
       break;
@@ -460,9 +516,10 @@ void Ui::OnSwitchReleased(const Event& e) {
       {
         const bool calibrating = mode_ >= MODE_CALIBRATION_1 && \
             mode_ <= MODE_CALIBRATION_4;
-        bool reverb_edited = false;
+        bool reverb_edited = assignable_cv_pot_[
+            MIX_PARAMETER_REVERB].editing_hidden_parameter();
         if (!calibrating) {
-          reverb_edited = UnlockMainPots();
+          reverb_edited = UnlockMainPots() || reverb_edited;
         }
         if (!assignable_cv_pot_[0].editing_hidden_parameter() &&
             !reverb_edited) {
@@ -486,7 +543,8 @@ void Ui::OnSwitchReleased(const Event& e) {
           // Save the manual gain or reverb settings.
           settings_->SaveState();
         }
-        assignable_cv_pot_[0].Unlock();
+        assignable_cv_pot_[MIX_PARAMETER_FEEDBACK].Unlock();
+        assignable_cv_pot_[MIX_PARAMETER_REVERB].Unlock();
       }
       break;
 

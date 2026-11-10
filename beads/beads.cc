@@ -42,6 +42,7 @@
 #include "beads/normalization_detector.h"
 #include "beads/settings.h"
 #include "beads/ui.h"
+#include "stmlib/system/system_clock.h"
 
 using namespace std;
 using namespace beads;
@@ -76,8 +77,10 @@ volatile bool ready = false;
 struct CpuLoad {
   uint32_t last;
   uint32_t peak;
+  uint32_t window_peak;  // Since the UI last read it.
 };
 volatile CpuLoad cpu_load;
+const float kCpuBudget = 100000.0f;
 
 class ScopedCpuLoadMeter {
  public:
@@ -87,6 +90,9 @@ class ScopedCpuLoadMeter {
     cpu_load.last = elapsed;
     if (elapsed > cpu_load.peak) {
       cpu_load.peak = elapsed;
+    }
+    if (elapsed > cpu_load.window_peak) {
+      cpu_load.window_peak = elapsed;
     }
   }
   
@@ -128,7 +134,9 @@ bool codec_stopped;
 GateFlags previous_seed;
 stmlib::DelayLine<Codec::Event, 256> event_delay;
 
-void Process(
+// With BEADS_ITCM, the audio callback and the DSP code it calls most run from
+// ITCM: see beads/dsp/itcm.h.
+ITCM void Process(
     const Codec::Event* events,
     const Codec::Frame* in,
     Codec::Frame* out,
@@ -280,6 +288,7 @@ void Process(
   m.reverb.decay = float(reverb[REVERB_SETTING_DECAY]) / 255.0f;
   m.reverb.tone = float(reverb[REVERB_SETTING_TONE]) / 255.0f;
   m.reverb.diffusion = float(reverb[REVERB_SETTING_DIFFUSION]) / 255.0f;
+  m.reverb.ducking = float(settings.state().reverb_ducking) / 255.0f;
 
   SeedButtonState seed_button_state = ui.seed_button_locked()
       ? SEED_BUTTON_STATE_LOCKED
@@ -296,6 +305,7 @@ void Process(
       d, p, m,
       float_in,
       float_out, size);
+  ui.set_delay_state(processor.delay_mode(), processor.ReadDelayPulse());
   
   // Conversion of output samples into integers.
   for (size_t i = 0; i < size; ++i) {
@@ -327,7 +337,31 @@ void ConfigureAndStartCodec(bool reset_gain_control) {
   codec.Start(sr, sr / kBlockRate, &Process);
 }
 
+#ifdef BEADS_ITCM
+// The startup code only copies .data: copy the code that runs from ITCM.
+extern "C" {
+extern uint64_t _siitcm;
+extern uint64_t _sitcm;
+extern uint64_t _eitcm;
+}
+
+void CopyItcm() {
+  // In whole 64-bit words, the width of the ITCM and of its ECC: a narrower
+  // write is a read-modify-write, and the read of a never written word fails
+  // its ECC check. Volatile, so that the loop is not turned into memcpy.
+  const volatile uint64_t* source = &_siitcm;
+  volatile uint64_t* destination = &_sitcm;
+  while (destination < &_eitcm) {
+    *destination++ = *source++;
+  }
+  __asm__ volatile ("dsb\n\tisb" ::: "memory");
+}
+#endif  // BEADS_ITCM
+
 void Init() {
+#ifdef BEADS_ITCM
+  CopyItcm();
+#endif  // BEADS_ITCM
   System sys;
   sys.Init(true);
 
@@ -424,7 +458,22 @@ int main(void) {
     if (!codec_stopped) {
       background_buffer_backup.Process(ui.freeze_led_state());
     }
+#ifndef BEADS_WARM_CACHES
+    // Stock Beads keeps a dummy grain player busy between audio blocks, with
+    // the most scattered memory accesses, so that the power draw stays
+    // steady. It also leaves the caches full of its own code and data at the
+    // start of every audio block. Test builds can leave it out, to measure
+    // how much time that costs the audio interrupt.
     processor.WasteCPUCycles(16);
+#endif  // BEADS_WARM_CACHES
+#ifdef CPU_METER
+    static uint32_t last_read = 0;
+    if (system_clock.milliseconds() - last_read >= 250) {
+      last_read = system_clock.milliseconds();
+      ui.set_cpu_load(float(cpu_load.window_peak) / kCpuBudget);
+      cpu_load.window_peak = 0;
+    }
+#endif  // CPU_METER
   }
 }
 

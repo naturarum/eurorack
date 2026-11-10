@@ -592,8 +592,16 @@ void TestMultitapDelay() {
 
       FloatFrame frame;
       frame = 0.0f;
+      FloatFrame feedback;
+      feedback = 0.0f;
 
       DelayController::Output delay;
+      for (int k = 0; k < DelayController::NUM_TAPS; ++k) {
+        delay.tap[k].delay = 0;
+        delay.tap[k].gain = 0.0f;
+        delay.tap[k].pan = 0.0f;
+        delay.tap[k].feedback = 0.0f;
+      }
       delay.tap[0].delay = delay_time << 16;
       delay.tap[0].gain = 1.0f;
 
@@ -602,7 +610,8 @@ void TestMultitapDelay() {
           delay,
           1.0f,
           0.5f,
-          &frame);
+          &frame,
+          &feedback);
       wav_writer.Write(&frame.l, &frame.r, 1);
     }
   }

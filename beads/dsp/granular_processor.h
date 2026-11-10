@@ -83,6 +83,11 @@ class GranularProcessor {
     multitap_delay_.Reset();
   }
   
+  // Number of grains that can play at once, 32 at most.
+  inline void set_num_voices(int num_voices) {
+    granular_player_.set_num_voices(num_voices);
+  }
+  
   inline int max_delay_times_ratio() const {
     return max_delay * ratio;
   }
@@ -230,6 +235,8 @@ class GranularProcessor {
       for (size_t j = 0; j < DelayController::NUM_TAPS; ++j) {
         out->tap[j].delay = in[i].tap[j].delay / ratio;
         out->tap[j].gain = in[i].tap[j].gain;
+        out->tap[j].pan = in[i].tap[j].pan;
+        out->tap[j].feedback = in[i].tap[j].feedback;
       }
       ++out;
     }
@@ -314,6 +321,11 @@ class GranularProcessor {
 
       out->l = 0.0f;
       out->r = 0.0f;
+      // In delay mode, the taps choose what feeds back. In granular mode,
+      // the whole output does.
+      FloatFrame feedback_source;
+      feedback_source.l = 0.0f;
+      feedback_source.r = 0.0f;
       if (mono) {
         mono_delay_line_.Write(s, *freeze);
         if (triggers) {
@@ -329,7 +341,8 @@ class GranularProcessor {
               *taps,
               speed_modulation.Next(),
               bandwidth_modulation.Next(),
-              out);
+              out,
+              &feedback_source);
         }
       } else {
         stereo_delay_line_.Write(s, *freeze);
@@ -346,19 +359,23 @@ class GranularProcessor {
               *taps,
               speed_modulation.Next(),
               bandwidth_modulation.Next(),
-              out);
+              out,
+              &feedback_source);
         }
       }
       
+      if (!taps) {
+        feedback_source = *out;
+      }
       ONE_POLE(
           previous_sample_.l,
           dc_blocker_[0].template Process<stmlib::FILTER_MODE_HIGH_PASS>(
-              out->l),
+              feedback_source.l),
           lp_coefficient);
       ONE_POLE(
           previous_sample_.r,
           dc_blocker_[1].template Process<stmlib::FILTER_MODE_HIGH_PASS>(
-              out->r),
+              feedback_source.r),
           lp_coefficient);
 
       if (triggers) {

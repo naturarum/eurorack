@@ -68,7 +68,8 @@ struct State {
   uint8_t monophonic_mode;
   uint8_t reverb[REVERB_SETTING_LAST];
   uint8_t reverb_version;  // 0 when saved by a firmware without the above.
-  uint8_t padding[8];
+  uint8_t reverb_ducking;  // Since version 2.
+  uint8_t padding[7];
   enum { tag = 0x54415453 };  // STAT
 };
 

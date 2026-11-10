@@ -54,6 +54,11 @@ class DelayClock {
     return fade_;
   }
   
+  // The most recent tempo, without the crossfade with the previous one.
+  inline float latest_interval() const {
+    return interval_[1];
+  }
+  
   inline float interval(int i) const {
     i = (i + rotate_) % 2;
     return interval_[i];

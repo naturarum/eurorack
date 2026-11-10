@@ -72,7 +72,16 @@ class GranularPlayer {
     max_grain_duration_ = sample_rate * 4.0f;
     sample_rate_ = sample_rate;
     one_hertz_ = 1.0f / sample_rate;
+    num_voices_ = num_grains;
     Reset();
+  }
+  
+  // Fewer voices than slots: new grains steal among the first num_voices
+  // slots only, exactly as they do among all of them otherwise, and only
+  // those are rendered. Set after Init, while no grain is playing.
+  inline void set_num_voices(int num_voices) {
+    CONSTRAIN(num_voices, 8, num_grains);
+    num_voices_ = num_voices;
   }
   
   inline void Reset() {
@@ -141,10 +150,10 @@ class GranularPlayer {
       std::rotate(
           &grain_priority_list_[0],
           &grain_priority_list_[1],
-          &grain_priority_list_[num_grains]);
+          &grain_priority_list_[num_voices_]);
       grain_priority_list_[0]->FadeOut(
           std::min(grain_interval_, instant_crossfade_time_));
-      for (int i = 1; i < num_grains - 1; ++i) {
+      for (int i = 1; i < num_voices_ - 1; ++i) {
         grain_priority_list_[i]->FadeOut(instant_crossfade_time_);
       }
     } else {
@@ -159,7 +168,7 @@ class GranularPlayer {
         std::rotate(
             &grain_priority_list_[0],
             &grain_priority_list_[1],
-            &grain_priority_list_[num_grains]);
+            &grain_priority_list_[num_voices_]);
         
         fade_time[0] = grain_interval_ + 1;
         fade_time[1] = instant_crossfade_time_;
@@ -179,7 +188,7 @@ class GranularPlayer {
         std::partial_sort(
             &grain_priority_list_[0],
             &grain_priority_list_[num_safety_grains],
-            &grain_priority_list_[num_grains],
+            &grain_priority_list_[num_voices_],
             T::Compare);
       
         fade_time[0] = instant_crossfade_time_;
@@ -214,6 +223,7 @@ class GranularPlayer {
   float one_hertz_;
   
   int grain_interval_;
+  int num_voices_;
   
   DISALLOW_COPY_AND_ASSIGN(GranularPlayer);
 };

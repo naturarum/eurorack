@@ -32,6 +32,8 @@
 #include "stmlib/dsp/hysteresis_quantizer.h"
 #include "stmlib/utils/gate_flags.h"
 
+#include "beads/dsp/itcm.h"
+
 #include <algorithm>
 
 namespace beads {
@@ -57,7 +59,7 @@ class TriggerGenerator {
 
   void Init(float sample_rate);
   
-  void Render(
+  ITCM void Render(
       SeedButtonState seed_button_state,
       const stmlib::GateFlags* external_input,
       float density,

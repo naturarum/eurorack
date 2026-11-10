@@ -31,6 +31,8 @@
 
 #include "stmlib/stmlib.h"
 
+#include "beads/dsp/itcm.h"
+
 #include "beads/dsp/granular_processor.h"
 #include "beads/dsp/modulated_parameter.h"
 #include "beads/dsp/fx/morph_reverb.h"
@@ -148,12 +150,23 @@ class Processor {
     }
   }
   
+  inline bool delay_mode() const {
+    return delay_mode_transition_ > 0.0f;
+  }
+  
+  // True once after each repeat of the delay. Read from the UI.
+  inline bool ReadDelayPulse() {
+    bool pulse = delay_pulse_;
+    delay_pulse_ = false;
+    return pulse;
+  }
+  
   void WasteCPUCycles(size_t size) {
     // The one with the most convoluted memory access!
     processor_vintage_digital_.WasteCPUCycles(size);
   }
 
-  void Process(
+  ITCM void Process(
       SeedButtonState seed_button_state,
       const stmlib::GateFlags* seed_input,
       const bool* freeze,
@@ -197,6 +210,8 @@ class Processor {
   bool mono_;
   
   float delay_mode_transition_;
+  bool previous_delay_gate_;
+  volatile bool delay_pulse_;
 
   float dry_;
   float wet_;

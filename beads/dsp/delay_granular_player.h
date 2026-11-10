@@ -68,7 +68,7 @@ class DelayGranularPlayer : public GranularPlayer<DelayGrain, 32> {
       SortGrainList(p.monophonic_mode);
     }
 
-    for (int i = 0; i < NUM_GRAINS; ++i) {
+    for (int i = 0; i < num_voices_; ++i) {
       grain_[i].Render<HEAD_CROSSING_POLICY_STOP, true>(delay_line, out);
     }
 

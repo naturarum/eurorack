@@ -25,6 +25,10 @@
 // -----------------------------------------------------------------------------
 //
 // Generates the delay time map.
+//
+// Modified in 2026 by naturarum: TIME sets the delay time and DENSITY picks a
+// pattern of taps (single, ping-pong, dotted, triplet, four taps). Delay time
+// changes crossfade between two sets of taps instead of gliding.
 
 #ifndef BEADS_DSP_DELAY_CONTROLLER_H_
 #define BEADS_DSP_DELAY_CONTROLLER_H_
@@ -41,8 +45,10 @@
 namespace beads {
 
 struct DelayTap {
-  int32_t delay;
-  float gain;
+  int32_t delay;  // In 1/1024th of a sample, 0 for a silent tap.
+  float gain;  // Level in the output.
+  float pan;  // -1: left only, 0: as recorded, 1: right only.
+  float feedback;  // Level in the feedback path.
 };
 
 class PlayHead {
@@ -81,6 +87,8 @@ class PlayHead {
   }
 
   inline void Render(DelayTap* tap, float shape, bool slave) {
+    tap->pan = 0.0f;
+    tap->feedback = 0.0f;
     if (done()) {
       tap->delay = 0;
       tap->gain = 0.0f;
@@ -173,10 +181,12 @@ class DelayController {
   ~DelayController() { }
   
   enum {
-    NUM_INTERVALS = 2,
-    NUM_RATIOS = 2,
-    NUM_HEADS = NUM_INTERVALS * NUM_RATIOS,
-    NUM_TAPS = NUM_HEADS * 2,
+    // When the delay time changes, the taps of the new time fade in while
+    // the old ones fade out.
+    NUM_SLOTS = 2,
+    // The main tap, and up to three more for the patterns.
+    NUM_PATTERN_TAPS = 4,
+    NUM_TAPS = NUM_SLOTS * NUM_PATTERN_TAPS,
   };
   
   struct Output {
@@ -186,7 +196,9 @@ class DelayController {
   
   void Init(float sample_rate, int max_delay);
   
-  void Render(
+  // feedback is the FEEDBACK knob: the ping-pong pattern needs it, because
+  // its feedback path skips every other repeat.
+  ITCM void Render(
       SeedButtonState seed_button_state,
       const stmlib::GateFlags* external_input,
       const bool* freeze,
@@ -195,6 +207,7 @@ class DelayController {
       float exponential_fm,
       const RandomizedParameter& position,
       const RandomizedParameter& shape,
+      float feedback,
       Output* out,
       size_t size);
   
@@ -205,35 +218,47 @@ class DelayController {
       const stmlib::GateFlags* external_input,
       const bool* freeze,
       float density,
-      float linear_fm,
-      float exponential_fm,
       const RandomizedParameter& position,
       const RandomizedParameter& shape,
+      float feedback,
       Output* out,
       size_t size);
   
+  // Delay time in samples for a TIME knob position, without a clock.
+  float FreeDelay(float time) const;
+
+  // Starts a crossfade to a new delay time if it differs enough from the
+  // current one, and advances the crossfade.
+  void UpdateSlots(float target_delay);
+  
   int max_delay_;
+  float sample_rate_;
+  float knee_delay_;
+  float top_semitones_;
   
   DelayClock clock_;
   
-  PlayHead play_head_[NUM_HEADS];
-  PlayHead slave_play_head_[NUM_HEADS];
-  stmlib::HysteresisQuantizer2 numerator_quantizer_[NUM_HEADS];
+  float slot_delay_[NUM_SLOTS];
+  int current_slot_;
+  float slot_fade_;
+  float slot_fade_increment_;
+  
+  PlayHead play_head_[NUM_SLOTS];
+  PlayHead slave_play_head_[NUM_SLOTS];
+  stmlib::HysteresisQuantizer2 numerator_quantizer_[NUM_SLOTS];
+  stmlib::HysteresisQuantizer2 ratio_quantizer_;
 
   TapEnvelope tap_envelope_[NUM_TAPS];
   
   RandomWalkModulation position_modulation_;
   RandomWalkModulation shape_modulation_;
-  SineOscillator tap_modulation_;
   
   stmlib::HysteresisFilter density_filter_;
-  stmlib::HysteresisFilter fm_filter_;
   stmlib::HysteresisFilter slice_index_filter_;
   
-  float multiplier_lp_;
+  float time_lp_;
   float shape_;
   float linear_fm_;
-  float fm_;
   float density_;
   
   bool freeze_;

@@ -25,6 +25,9 @@
 // -----------------------------------------------------------------------------
 //
 // Delay tap (delay + pitch-shifting).
+//
+// Modified in 2026 by naturarum: returns the frame, for the multitap delay to
+// pan it and route it to the feedback path.
 
 #ifndef BEADS_DSP_TAP_H_
 #define BEADS_DSP_TAP_H_
@@ -48,19 +51,20 @@ class Tap {
     phase_ = 0;
   }
   
+  // Returns the delayed frame (pitch-shifted with the longer window), or
+  // silence for a zero delay.
   template<typename DelayLineType>
-  inline void Render(
+  inline FloatFrame Read(
       const DelayLineType* delay_line,
       int32_t delay,
-      float gain,
-      float speed,
-      FloatFrame* out) {
+      float speed) {
+    FloatFrame silence;
+    silence.l = silence.r = 0.0f;
     if (delay == 0) {
-      return;
+      return silence;
     }
     if (window_size == 1) {
-      *out += gain * delay_line->template Read<INTERPOLATION_HERMITE>(delay);
-      return;
+      return delay_line->template Read<INTERPOLATION_HERMITE>(delay);
     }
     
     const int32_t full_window_size = 1024 * window_size;
@@ -83,7 +87,7 @@ class Tap {
     const FloatFrame head_2 = delay_line->template Read<INTERPOLATION_HERMITE>(
           -((phase_ + half_window_size) % full_window_size) + delay);
     
-    *out += (head_2 + (head_1 - head_2) * triangle) * gain;
+    return head_2 + (head_1 - head_2) * triangle;
   }
   
  private:

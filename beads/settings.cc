@@ -33,6 +33,8 @@
 
 #include "stmlib/system/storage.h"
 
+#include "beads/dsp/fx/morph_reverb.h"
+
 namespace beads {
 
 using namespace std;
@@ -41,14 +43,34 @@ using namespace std;
 // not change, or the settings saved on the module would not be found.
 STATIC_ASSERT(sizeof(State) == 24, state_size_changed);
 
-const uint8_t kReverbVersion = 1;
+// Version 2: stereo input, ducking, and a new diffusion knob (smooth at
+// noon, wash on the right half).
+const uint8_t kReverbVersion = 2;
 const uint8_t kDefaultReverb[REVERB_SETTING_LAST] = {
   128,  // Character: hall.
   128,  // Size.
   128,  // Decay: about 3.3 s.
   140,  // Tone.
-  204   // Diffusion.
+  128   // Diffusion: smooth, no wash.
 };
+
+// Finds the position of the new diffusion knob that sounds like a setting
+// saved by version 1, where the knob p gave a diffusion of p * (2 - p).
+static uint8_t ConvertDiffusionFromVersion1(uint8_t value) {
+  const float p = float(value) / 255.0f;
+  const float target = p * (2.0f - p);
+  float low = 0.0f;
+  float high = 1.0f;
+  for (int i = 0; i < 16; ++i) {
+    const float middle = 0.5f * (low + high);
+    if (MorphReverb::DiffusionCurve(middle) < target) {
+      low = middle;
+    } else {
+      high = middle;
+    }
+  }
+  return static_cast<uint8_t>(0.5f * (low + high) * 0.5f * 255.0f + 0.5f);
+}
 
 #define FIX_OUTLIER(destination, expected_value) if (fabsf(destination / expected_value - 1.0f) > 0.25f) { destination = expected_value; }
 #define FIX_OUTLIER_ABSOLUTE(destination, expected_value) if (fabsf(destination - expected_value) > 0.1f) { destination = expected_value; }
@@ -83,6 +105,7 @@ bool Settings::Init(bool recovery_mode) {
   copy(&kDefaultReverb[0], &kDefaultReverb[REVERB_SETTING_LAST],
        &state_.reverb[0]);
   state_.reverb_version = kReverbVersion;
+  state_.reverb_ducking = 0;
   
   if (recovery_mode) {
     chunk_storage_.Recover(&persistent_data_, &state_);
@@ -94,9 +117,16 @@ bool Settings::Init(bool recovery_mode) {
     // Sanitize settings read from flash.
     CONSTRAIN(state_.media, 0, 3);
     CONSTRAIN(state_.assignable_cv_destination, 0, 3);
-    if (state_.reverb_version != kReverbVersion) {
+    if (state_.reverb_version == 1) {
+      // Keep the sound saved by the first version.
+      state_.reverb[REVERB_SETTING_DIFFUSION] = ConvertDiffusionFromVersion1(
+          state_.reverb[REVERB_SETTING_DIFFUSION]);
+      state_.reverb_ducking = 0;
+      state_.reverb_version = kReverbVersion;
+    } else if (state_.reverb_version != kReverbVersion) {
       copy(&kDefaultReverb[0], &kDefaultReverb[REVERB_SETTING_LAST],
            &state_.reverb[0]);
+      state_.reverb_ducking = 0;
       state_.reverb_version = kReverbVersion;
     }
   }

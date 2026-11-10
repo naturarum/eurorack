@@ -25,6 +25,9 @@
 // -----------------------------------------------------------------------------
 //
 // Multitap delay.
+//
+// Modified in 2026 by naturarum: each tap has a pan position and a level in
+// the feedback path, which is rendered separately from the output.
 
 #ifndef BEADS_DSP_MULTITAP_DELAY_H_
 #define BEADS_DSP_MULTITAP_DELAY_H_
@@ -46,7 +49,7 @@ class MultitapDelay {
   
   inline void Init(float sample_rate) {
     Reset();
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 4; ++i) {
       filter_[i].Init();
     }
   }
@@ -61,30 +64,44 @@ class MultitapDelay {
   template<typename DelayLineType>
   inline void Render(
       const DelayLineType* delay_line,
-      DelayController::Output taps,
+      const DelayController::Output& taps,
       float speed,
       float bandwidth,
-      FloatFrame* out) {
+      FloatFrame* out,
+      FloatFrame* feedback) {
     
     // Cross-fade between the original and pitch-shifted delays.
-    float gain = 100.0f * (fabsf(speed - 1.0f) - 0.01f);
-    CONSTRAIN(gain, 0.0f, 1.0f);
+    float shift = 100.0f * (fabsf(speed - 1.0f) - 0.01f);
+    CONSTRAIN(shift, 0.0f, 1.0f);
 
     FloatFrame mix;
     mix.l = mix.r = 0.0f;
+    FloatFrame fb;
+    fb.l = fb.r = 0.0f;
     for (int i = 0; i < DelayController::NUM_TAPS; ++i) {
-      tap_[i].Render(
-          delay_line,
-          taps.tap[i].delay,
-          taps.tap[i].gain * gain,
-          speed,
-          &mix);
-      no_latency_tap_[i].Render(
-          delay_line,
-          taps.tap[i].delay,
-          taps.tap[i].gain * (1.0f - gain),
-          speed,
-          &mix);
+      const DelayTap& t = taps.tap[i];
+      if (t.delay == 0) {
+        continue;
+      }
+      FloatFrame f;
+      if (shift == 0.0f) {
+        f = no_latency_tap_[i].Read(delay_line, t.delay, speed);
+      } else if (shift == 1.0f) {
+        f = tap_[i].Read(delay_line, t.delay, speed);
+      } else {
+        const FloatFrame shifted = tap_[i].Read(delay_line, t.delay, speed);
+        const FloatFrame plain = no_latency_tap_[i].Read(
+            delay_line, t.delay, speed);
+        f = plain + (shifted - plain) * shift;
+      }
+      
+      // Panning: towards one side, the tap becomes mono, at constant power.
+      const float side = fabsf(t.pan);
+      const float mono = 0.7071f * (f.l + f.r) * side;
+      const float keep = 1.0f - side;
+      mix.l += t.gain * (keep * f.l + (t.pan < 0.0f ? mono : 0.0f));
+      mix.r += t.gain * (keep * f.r + (t.pan > 0.0f ? mono : 0.0f));
+      fb += f * t.feedback;
     }
 
 #ifdef ENABLE_BANDWIDTH_CONTROL
@@ -102,25 +119,36 @@ class MultitapDelay {
     
     filter_[0].set_f_q<stmlib::FREQUENCY_FAST>(f, q);
     filter_[1].set(filter_[0]);
+    filter_[2].set(filter_[0]);
+    filter_[3].set(filter_[0]);
     
+    // The filter is also in the feedback path, so that each repeat is
+    // darker (or thinner) than the previous one.
     FloatFrame wet;
+    FloatFrame fb_wet;
     if (bandwidth < 0.5f) {
       wet.l = filter_[0].Process<stmlib::FILTER_MODE_LOW_PASS>(mix.l);
       wet.r = filter_[1].Process<stmlib::FILTER_MODE_LOW_PASS>(mix.r);
+      fb_wet.l = filter_[2].Process<stmlib::FILTER_MODE_LOW_PASS>(fb.l);
+      fb_wet.r = filter_[3].Process<stmlib::FILTER_MODE_LOW_PASS>(fb.r);
     } else {
       wet.l = filter_[0].Process<stmlib::FILTER_MODE_HIGH_PASS>(mix.l);
       wet.r = filter_[1].Process<stmlib::FILTER_MODE_HIGH_PASS>(mix.r);
+      fb_wet.l = filter_[2].Process<stmlib::FILTER_MODE_HIGH_PASS>(fb.l);
+      fb_wet.r = filter_[3].Process<stmlib::FILTER_MODE_HIGH_PASS>(fb.r);
     }
     *out += mix + (wet - mix) * wet_amount;
+    *feedback += fb + (fb_wet - fb) * wet_amount;
 #else
     *out += mix;
+    *feedback += fb;
 #endif  // ENABLE_BANDWIDTH_CONTROL
   }
 
  private:
   Tap<2048> tap_[DelayController::NUM_TAPS];
   Tap<1> no_latency_tap_[DelayController::NUM_TAPS];
-  stmlib::Svf filter_[2];
+  stmlib::Svf filter_[4];
 
   DISALLOW_COPY_AND_ASSIGN(MultitapDelay);
 };
