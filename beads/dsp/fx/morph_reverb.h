@@ -48,7 +48,7 @@
 //
 // The diffusion knob has two halves. On the left half the matrix angles and
 // the input diffusers go from separate echoes to a smooth tail. On the right
-// half the matrix stays fully mixed, three long allpass diffusers per side
+// half the matrix stays fully mixed, two long allpass diffusers per side
 // fade in to blur attacks into a swell, and the early reflections fade out.
 //
 // Ducking lowers the wet signal while the input is loud, and lets the tail
@@ -97,10 +97,15 @@ const size_t kReverbNumLines = 8;
 const size_t kReverbNumSpringLines = 4;
 const size_t kReverbNumSpringStages = 24;
 const int32_t kReverbMaxSpringStretch = 7;
-const size_t kReverbNumEarlyTaps = 6;
+const size_t kReverbNumEarlyTaps = 4;
 const size_t kReverbNumDiffusers = 4;
-const size_t kReverbNumWashDiffusers = 3;
+const size_t kReverbNumWashDiffusers = 2;
 const size_t kReverbMaxBlockSize = 24;
+
+// The parameters are worked out over this many blocks, a part in each block,
+// so that no block pays for all of it. At 48 kHz: 1 kHz, much faster than
+// the glides.
+const int32_t kReverbControlPeriod = 4;
 
 // Above this rate, the reverb runs at half the rate between a halfband
 // decimator and interpolator. That halves its cost, so that the grains keep
@@ -129,8 +134,10 @@ const float kReverbQuietTime = 0.5f;
 
 // The large pool is the buffer passed to Init (SRAM4 on the module). The
 // two small pools are member arrays, which end up in DTCM with the processor.
+// At half rate everything fits in the two small pools, and the large one is
+// left alone: DTCM takes no cache misses.
 const size_t kReverbNumPools = 3;
-constexpr uint32_t kReverbPoolSize[kReverbNumPools] = { 32768, 16384, 8192 };
+constexpr uint32_t kReverbPoolSize[kReverbNumPools] = { 32768, 16384, 16384 };
 
 // Delay lines are read in blocks, so they must never be shorter than a block.
 const float kReverbMinDelay = float(kReverbMaxBlockSize + 2);
@@ -252,17 +259,17 @@ class MorphReverb {
           &line_[i]);
     }
     // At full rate, the left side keeps the pools of the mono version and
-    // the right side lives in the third pool. At half rate, both sides share
-    // the large pool.
+    // the right side lives in the third pool. At half rate, both sides live
+    // in the third pool, with lines 6 and 7.
     const float diffuser_ms[kReverbNumDiffusers] = {
       4.77f, 3.59f, 2.73f, 1.83f
     };
     const float wash_ms[2][kReverbNumWashDiffusers] = {
-      { 8.9f, 13.3f, 19.7f },
-      { 9.7f, 12.1f, 21.1f }
+      { 11.3f, 19.7f },
+      { 12.7f, 21.1f }
     };
     for (size_t side = 0; side < 2; ++side) {
-      const int pool = side == 0 || factor_ == 2 ? 0 : 2;
+      const int pool = side == 0 && factor_ == 1 ? 0 : 2;
       Allocate(pool, kReverbMaxEarlyMs * samples_per_ms_,
                &pre_delay_line_[side]);
       for (size_t i = 0; i < kReverbNumDiffusers; ++i) {
@@ -317,6 +324,8 @@ class MorphReverb {
     duck_envelope_ = 0.0f;
     write_ptr_ = 0;
     chain_index_ = 0;
+    control_phase_ = 0;
+    control_peak_ = 0.0f;
     // The first block jumps to the parameters instead of gliding.
     snap_ = true;
   }
@@ -628,14 +637,48 @@ class MorphReverb {
 #undef BLEND
   }
 
-  ITCM_SECTION(reverb_parameters) REVERB_COMPACT void UpdateParameters(
-      size_t size, float input_peak) {
-    const float block_time = float(size) / sample_rate_;
+  // One part of the parameter update per block, in turn. On the first block
+  // after a clear, all of them, and the parameters jump to their targets.
+  REVERB_COMPACT void UpdateControl(size_t size) {
+    const float period_samples = float(size * kReverbControlPeriod);
+    const float control_time = period_samples / sample_rate_;
+    // Delays reach their new targets when their part comes round again.
+    const float increment_scale = 1.0f / period_samples;
+    if (snap_) {
+      UpdateGlobals(control_time);
+      UpdateLines(0, control_time, increment_scale);
+      UpdateLines(4, control_time, increment_scale);
+      UpdateFrontEnd(control_time, increment_scale);
+      snap_ = false;
+      control_phase_ = 0;
+      return;
+    }
+    switch (control_phase_) {
+      case 0:
+        UpdateGlobals(control_time);
+        break;
+      case 1:
+        UpdateLines(0, control_time, increment_scale);
+        break;
+      case 2:
+        UpdateLines(4, control_time, increment_scale);
+        break;
+      default:
+        UpdateFrontEnd(control_time, increment_scale);
+        break;
+    }
+    if (++control_phase_ >= kReverbControlPeriod) {
+      control_phase_ = 0;
+    }
+  }
 
+  // Glides, character, scales, levels and ducking.
+  ITCM_SECTION(reverb_globals) REVERB_COMPACT void UpdateGlobals(
+      float control_time) {
     // Size and character glide slowly (about 80 ms): turning them bends the
     // pitch of the tail, like a tape speed change.
-    const float slow = snap_ ? 1.0f : std::min(block_time * 12.0f, 1.0f);
-    const float fast = snap_ ? 1.0f : std::min(block_time * 50.0f, 1.0f);
+    const float slow = snap_ ? 1.0f : std::min(control_time * 12.0f, 1.0f);
+    const float fast = snap_ ? 1.0f : std::min(control_time * 50.0f, 1.0f);
     ONE_POLE(parameters_.character, target_.character, slow);
     ONE_POLE(parameters_.size, target_.size, slow);
     ONE_POLE(parameters_.decay, target_.decay, fast);
@@ -643,94 +686,24 @@ class MorphReverb {
     ONE_POLE(parameters_.diffusion, target_.diffusion, fast);
     ONE_POLE(parameters_.ducking, target_.ducking, fast);
 
-    ReverbCharacter c;
-    Blend(parameters_.character, &c);
+    Blend(parameters_.character, &character_);
+    const ReverbCharacter& c = character_;
 
     // Size scales all lengths from 0.25x to 1.6x. Pre-delay and early
     // reflections follow more gently.
     const float log2_scale = -2.0f + 2.678f * parameters_.size;
-    const float scale = Exp2(log2_scale);
-    const float soft_scale = Exp2(0.7f * log2_scale);
+    scale_ = Exp2(log2_scale);
+    soft_scale_ = Exp2(0.7f * log2_scale);
 
     // Decay: 0.3 s to 36 s, times the character's own scale. Tone sets how
     // much faster the highs die (Nyquist over DC decay time, 0.06 to 0.9).
     const float t60 = 0.3f * Exp2(6.907f * parameters_.decay) * c.decay_scale;
-    const float tone_ratio = 0.06f * Exp2(3.907f * parameters_.tone);
+    decay_per_sample_ = -9.9658f / (t60 * sample_rate_);
+    tone_ratio_ = 0.06f * Exp2(3.907f * parameters_.tone);
     // Left half of the knob: separate echoes to smooth. Right half: smooth
     // to a wash.
-    const float diffusion = DiffusionCurve(
-        std::min(2.0f * parameters_.diffusion, 1.0f));
-    const float smear = std::max(2.0f * parameters_.diffusion - 1.0f, 0.0f);
-
-    // Matrix angles, slowly modulated to break up resonances.
-    const float angle_modulation = 0.05f * (0.25f + 0.75f * diffusion);
-    const float angle_lfo_hz[3] = { 0.071f, 0.113f, 0.053f };
-    for (size_t level = 0; level < 3; ++level) {
-      angle_lfo_phase_[level] += angle_lfo_hz[level] * block_time;
-      if (angle_lfo_phase_[level] >= 1.0f) {
-        angle_lfo_phase_[level] -= 1.0f;
-      }
-      float theta = 0.7853982f * diffusion * c.coupling[level] + \
-          angle_modulation * Lfo(angle_lfo_phase_[level]);
-      float theta2 = theta * theta;
-      float s = theta * (1.0f - theta2 * (0.16666667f - theta2 * 0.00833333f));
-      float co = 1.0f - theta2 * (0.5f - theta2 * (
-          0.04166667f - theta2 * 0.00138889f));
-      // Keep the matrix exactly lossless despite the approximations.
-      float norm = 1.0f / stmlib::Sqrt(s * s + co * co);
-      rotation_sin_[level] = s * norm;
-      rotation_cos_[level] = co * norm;
-    }
-
-    // Lines: delay with modulation, and the absorption filter (one pole,
-    // with the decay times at DC and at Nyquist as end points).
-    const float lfo_ratio[kReverbNumLines] = {
-      1.0f, 1.37f, 0.71f, 1.93f, 0.83f, 1.19f, 1.61f, 0.59f
-    };
-    const float spring_spread[kReverbNumSpringLines] = {
-      1.0f, 0.93f, 1.05f, 0.97f
-    };
-    const float modulation = c.modulation_ms * samples_per_ms_;
-    const float decay_per_sample = -9.9658f / (t60 * sample_rate_);
-    const float increment_scale = 1.0f / float(size);
-    for (size_t i = 0; i < kReverbNumLines; ++i) {
-      lfo_phase_[i] += c.modulation_hz * lfo_ratio[i] * block_time;
-      if (lfo_phase_[i] >= 1.0f) {
-        lfo_phase_[i] -= 1.0f;
-      }
-
-      const float loop = c.line_ms[i] * scale * samples_per_ms_;
-      float delay = loop;
-      if (i < kReverbNumSpringLines) {
-        // The allpass cascade adds its own delay: take its low-frequency
-        // group delay out of the line.
-        const float a = c.dispersion * spring_spread[i];
-        dispersion_[i] = a;
-        delay -= float(num_stages_ * stretch_) * \
-            (1.0f - a) / (1.0f + a);
-      }
-      delay += modulation * Lfo(lfo_phase_[i]);
-      CONSTRAIN(delay, kReverbMinDelay, float(line_[i].length - 1));
-      if (snap_) {
-        line_delay_[i] = delay;
-      }
-      line_delay_increment_[i] = (delay - line_delay_[i]) * increment_scale;
-
-      const float g_dc = Exp2(decay_per_sample * loop);
-      const float g_nyquist = Exp2(decay_per_sample * loop / tone_ratio);
-      float pole = (g_dc - g_nyquist) / (g_dc + g_nyquist);
-      if (factor_ == 2) {
-        // The end points stay those of the full rate filter: DC and 24 kHz.
-        // At half rate the pole gives the same gain at 6 kHz, half the new
-        // Nyquist, and the two filters stay close over the whole band.
-        const float r2 = (1.0f - pole) * (1.0f - pole) / (
-            1.0f - 1.4142136f * pole + pole * pole);
-        const float a = 1.0f - r2;
-        pole = a / (1.0f + stmlib::Sqrt(1.0f - a * a));
-      }
-      absorption_pole_[i] = pole;
-      absorption_gain_[i] = g_dc * (1.0f - pole);
-    }
+    diffusion_ = DiffusionCurve(std::min(2.0f * parameters_.diffusion, 1.0f));
+    smear_ = std::max(2.0f * parameters_.diffusion - 1.0f, 0.0f);
 
     // Injection and output weights. Towards the spring end, lines 4 to 7
     // fade out.
@@ -744,61 +717,6 @@ class MorphReverb {
     }
     output_norm_ = 1.0f / (kReverbTankHeadroom * stmlib::Sqrt(
         2.0f + 2.0f * second_group_ * second_group_));
-
-    // Pre-delay and early reflections.
-    float pre_delay = c.pre_delay_ms * soft_scale * samples_per_ms_;
-    CONSTRAIN(pre_delay, 1.0f, float(pre_delay_line_[0].length - 1));
-    if (snap_) {
-      pre_delay_ = pre_delay;
-    }
-    pre_delay_increment_ = (pre_delay - pre_delay_) * increment_scale;
-
-    const float early_time[2][kReverbNumEarlyTaps] = {
-      { 0.07f, 0.21f, 0.36f, 0.52f, 0.71f, 0.90f },
-      { 0.12f, 0.27f, 0.43f, 0.60f, 0.77f, 0.95f }
-    };
-    const float span = c.early_span_ms * soft_scale;
-    for (size_t channel = 0; channel < 2; ++channel) {
-      for (size_t j = 0; j < kReverbNumEarlyTaps; ++j) {
-        float d = (1.0f + early_time[channel][j] * span) * samples_per_ms_;
-        CONSTRAIN(d, 1.0f, float(pre_delay_line_[0].length - 1));
-        if (snap_) {
-          early_delay_[channel][j] = d;
-        }
-        early_increment_[channel][j] = \
-            (d - early_delay_[channel][j]) * increment_scale;
-      }
-    }
-    early_level_ = c.early_level * (1.0f - 0.85f * smear);
-    early_feed_ = 0.35f * c.early_level;
-    diffuser_gain_ = 0.7f * diffusion * c.diffuser;
-    // Equal power crossfade: the diffused signal is almost uncorrelated with
-    // the direct one.
-    const float wash_mix = smear * c.wash;
-    dry_wash_ = stmlib::Sqrt(1.0f - wash_mix);
-    wet_wash_ = stmlib::Sqrt(wash_mix);
-    wash_gain_ = 0.5f + 0.2f * smear;
-
-    // Input band limits (the spring is thin and dark) and output tone. At
-    // half rate the low-pass filters go up to 10 kHz, which takes a more
-    // accurate tangent so close to Nyquist.
-    input_hp_[0].set_f<stmlib::FREQUENCY_DIRTY>(c.input_hp_hz / sample_rate_);
-    input_hp_[1].set_f<stmlib::FREQUENCY_DIRTY>(c.input_hp_hz / sample_rate_);
-    const float tone_hz = 2000.0f * Exp2(3.3219f * parameters_.tone);
-    if (factor_ == 2) {
-      input_lp_[0].set_f_q<stmlib::FREQUENCY_ACCURATE>(
-          std::min(c.input_lp_hz / sample_rate_, 0.42f), 0.7f);
-      const float output_lp = std::min(tone_hz / sample_rate_, 0.42f);
-      output_lp_[0].set_f<stmlib::FREQUENCY_ACCURATE>(output_lp);
-      output_lp_[1].set_f<stmlib::FREQUENCY_ACCURATE>(output_lp);
-    } else {
-      input_lp_[0].set_f_q<stmlib::FREQUENCY_FAST>(
-          std::min(c.input_lp_hz / sample_rate_, 0.35f), 0.7f);
-      const float output_lp = std::min(tone_hz / sample_rate_, 0.35f);
-      output_lp_[0].set_f<stmlib::FREQUENCY_FAST>(output_lp);
-      output_lp_[1].set_f<stmlib::FREQUENCY_FAST>(output_lp);
-    }
-    input_lp_[1].set(input_lp_[0]);
 
     // Longer tails build up more energy: compensate part of it, so that the
     // REVERB knob keeps the same meaning at all decay settings. The cut for
@@ -820,27 +738,158 @@ class MorphReverb {
 
     // Ducking: a peak follower on the input, fast attack and slow release.
     // Its gain reduction reaches 24 dB at full depth with a loud input.
-    const float duck_coefficient = input_peak > duck_envelope_
-        ? DUCK_ATTACK * block_time
-        : DUCK_RELEASE * block_time;
+    const float duck_coefficient = control_peak_ > duck_envelope_
+        ? DUCK_ATTACK * control_time
+        : DUCK_RELEASE * control_time;
     duck_envelope_ += std::min(duck_coefficient, 1.0f) * (
-        input_peak - duck_envelope_);
+        control_peak_ - duck_envelope_);
+    control_peak_ = 0.0f;
     const float duck = std::min(duck_envelope_ * DUCK_SENSITIVITY, 1.0f);
     wet_target_ *= Exp2(-4.0f * parameters_.ducking * duck);
+  }
 
-    snap_ = false;
+  // Four lines: delay with modulation, and the absorption filter (one pole,
+  // with the decay times at DC and at Nyquist as end points).
+  ITCM_SECTION(reverb_lines) REVERB_COMPACT void UpdateLines(
+      size_t first, float control_time, float increment_scale) {
+    const ReverbCharacter& c = character_;
+    const float lfo_ratio[kReverbNumLines] = {
+      1.0f, 1.37f, 0.71f, 1.93f, 0.83f, 1.19f, 1.61f, 0.59f
+    };
+    const float spring_spread[kReverbNumSpringLines] = {
+      1.0f, 0.93f, 1.05f, 0.97f
+    };
+    const float modulation = c.modulation_ms * samples_per_ms_;
+    for (size_t i = first; i < first + 4; ++i) {
+      lfo_phase_[i] += c.modulation_hz * lfo_ratio[i] * control_time;
+      if (lfo_phase_[i] >= 1.0f) {
+        lfo_phase_[i] -= 1.0f;
+      }
+
+      const float loop = c.line_ms[i] * scale_ * samples_per_ms_;
+      float delay = loop;
+      if (i < kReverbNumSpringLines) {
+        // The allpass cascade adds its own delay: take its low-frequency
+        // group delay out of the line.
+        const float a = c.dispersion * spring_spread[i];
+        dispersion_[i] = a;
+        delay -= float(num_stages_ * stretch_) * \
+            (1.0f - a) / (1.0f + a);
+      }
+      delay += modulation * Lfo(lfo_phase_[i]);
+      CONSTRAIN(delay, kReverbMinDelay, float(line_[i].length - 1));
+      if (snap_) {
+        line_delay_[i] = delay;
+      }
+      line_delay_increment_[i] = (delay - line_delay_[i]) * increment_scale;
+
+      const float g_dc = Exp2(decay_per_sample_ * loop);
+      const float g_nyquist = Exp2(decay_per_sample_ * loop / tone_ratio_);
+      float pole = (g_dc - g_nyquist) / (g_dc + g_nyquist);
+      if (factor_ == 2) {
+        // The end points stay those of the full rate filter: DC and 24 kHz.
+        // At half rate the pole gives the same gain at 6 kHz, half the new
+        // Nyquist, and the two filters stay close over the whole band.
+        const float r2 = (1.0f - pole) * (1.0f - pole) / (
+            1.0f - 1.4142136f * pole + pole * pole);
+        const float a = 1.0f - r2;
+        pole = a / (1.0f + stmlib::Sqrt(1.0f - a * a));
+      }
+      absorption_pole_[i] = pole;
+      absorption_gain_[i] = g_dc * (1.0f - pole);
+    }
+  }
+
+  // Mixing matrix, pre-delay, early reflections, diffusers and filters.
+  ITCM_SECTION(reverb_front_end) REVERB_COMPACT void UpdateFrontEnd(
+      float control_time, float increment_scale) {
+    const ReverbCharacter& c = character_;
+    // Matrix angles, slowly modulated to break up resonances.
+    const float angle_modulation = 0.05f * (0.25f + 0.75f * diffusion_);
+    const float angle_lfo_hz[3] = { 0.071f, 0.113f, 0.053f };
+    for (size_t level = 0; level < 3; ++level) {
+      angle_lfo_phase_[level] += angle_lfo_hz[level] * control_time;
+      if (angle_lfo_phase_[level] >= 1.0f) {
+        angle_lfo_phase_[level] -= 1.0f;
+      }
+      float theta = 0.7853982f * diffusion_ * c.coupling[level] + \
+          angle_modulation * Lfo(angle_lfo_phase_[level]);
+      float theta2 = theta * theta;
+      float s = theta * (1.0f - theta2 * (0.16666667f - theta2 * 0.00833333f));
+      float co = 1.0f - theta2 * (0.5f - theta2 * (
+          0.04166667f - theta2 * 0.00138889f));
+      // Keep the matrix exactly lossless despite the approximations.
+      float norm = 1.0f / stmlib::Sqrt(s * s + co * co);
+      rotation_sin_[level] = s * norm;
+      rotation_cos_[level] = co * norm;
+    }
+
+    float pre_delay = c.pre_delay_ms * soft_scale_ * samples_per_ms_;
+    CONSTRAIN(pre_delay, 1.0f, float(pre_delay_line_[0].length - 1));
+    if (snap_) {
+      pre_delay_ = pre_delay;
+    }
+    pre_delay_increment_ = (pre_delay - pre_delay_) * increment_scale;
+
+    const float early_time[2][kReverbNumEarlyTaps] = {
+      { 0.07f, 0.29f, 0.52f, 0.90f },
+      { 0.12f, 0.36f, 0.60f, 0.95f }
+    };
+    const float span = c.early_span_ms * soft_scale_;
+    for (size_t channel = 0; channel < 2; ++channel) {
+      for (size_t j = 0; j < kReverbNumEarlyTaps; ++j) {
+        float d = (1.0f + early_time[channel][j] * span) * samples_per_ms_;
+        CONSTRAIN(d, 1.0f, float(pre_delay_line_[0].length - 1));
+        if (snap_) {
+          early_delay_[channel][j] = d;
+        }
+        early_increment_[channel][j] = \
+            (d - early_delay_[channel][j]) * increment_scale;
+      }
+    }
+    early_level_ = c.early_level * (1.0f - 0.85f * smear_);
+    early_feed_ = 0.35f * c.early_level;
+    diffuser_gain_ = 0.7f * diffusion_ * c.diffuser;
+    // Equal power crossfade: the diffused signal is almost uncorrelated with
+    // the direct one.
+    const float wash_mix = smear_ * c.wash;
+    dry_wash_ = stmlib::Sqrt(1.0f - wash_mix);
+    wet_wash_ = stmlib::Sqrt(wash_mix);
+    wash_gain_ = 0.5f + 0.2f * smear_;
+
+    // Input band limits (the spring is thin and dark) and output tone. At
+    // half rate the low-pass filters go up to 10 kHz, which takes a more
+    // accurate tangent so close to Nyquist.
+    input_hp_[0].set_f<stmlib::FREQUENCY_DIRTY>(c.input_hp_hz / sample_rate_);
+    input_hp_[1].set_f<stmlib::FREQUENCY_DIRTY>(c.input_hp_hz / sample_rate_);
+    const float tone_hz = 2000.0f * Exp2(3.3219f * parameters_.tone);
+    if (factor_ == 2) {
+      input_lp_[0].set_f_q<stmlib::FREQUENCY_ACCURATE>(
+          std::min(c.input_lp_hz / sample_rate_, 0.42f), 0.7f);
+      const float output_lp = std::min(tone_hz / sample_rate_, 0.42f);
+      output_lp_[0].set_f<stmlib::FREQUENCY_ACCURATE>(output_lp);
+      output_lp_[1].set_f<stmlib::FREQUENCY_ACCURATE>(output_lp);
+    } else {
+      input_lp_[0].set_f_q<stmlib::FREQUENCY_FAST>(
+          std::min(c.input_lp_hz / sample_rate_, 0.35f), 0.7f);
+      const float output_lp = std::min(tone_hz / sample_rate_, 0.35f);
+      output_lp_[0].set_f<stmlib::FREQUENCY_FAST>(output_lp);
+      output_lp_[1].set_f<stmlib::FREQUENCY_FAST>(output_lp);
+    }
+    input_lp_[1].set(input_lp_[0]);
   }
 
   // Writes the wet signal only: the dry level is applied by Process, at the
   // full rate.
   ITCM_SECTION(reverb_block) REVERB_COMPACT void ProcessBlock(
       const FloatFrame* in, FloatFrame* wet_out, size_t size) {
-    float input_peak = 0.0f;
+    float input_peak = control_peak_;
     for (size_t k = 0; k < size; ++k) {
       input_peak = std::max(input_peak, std::max(
           fabsf(in[k].l), fabsf(in[k].r)));
     }
-    UpdateParameters(size, input_peak);
+    control_peak_ = input_peak;
+    UpdateControl(size);
 
     stmlib::ParameterInterpolator send_modulation(&send_, send_target_, size);
     stmlib::ParameterInterpolator wet_modulation(&wet_, wet_target_, size);
@@ -850,15 +899,15 @@ class MorphReverb {
     float early_r[kReverbMaxBlockSize];
 
     const float early_gain[2][kReverbNumEarlyTaps] = {
-      { 0.84f, -0.66f, 0.55f, -0.45f, 0.36f, -0.28f },
-      { 0.80f, -0.62f, 0.58f, -0.42f, 0.33f, -0.26f }
+      { 0.88f, -0.72f, 0.60f, -0.42f },
+      { 0.86f, -0.70f, 0.62f, -0.42f }
     };
-    // Two reflections of each side come from the other side's input.
+    // One reflection of each side comes from the other side's input.
     const DelayLine* early_source[2][kReverbNumEarlyTaps] = {
       { &pre_delay_line_[0], &pre_delay_line_[0], &pre_delay_line_[1],
-        &pre_delay_line_[0], &pre_delay_line_[0], &pre_delay_line_[1] },
+        &pre_delay_line_[0] },
       { &pre_delay_line_[1], &pre_delay_line_[1], &pre_delay_line_[0],
-        &pre_delay_line_[1], &pre_delay_line_[1], &pre_delay_line_[0] }
+        &pre_delay_line_[1] }
     };
 
     // At the spring end, the early reflections are silent: skip them.
@@ -900,34 +949,50 @@ class MorphReverb {
 
       pre_delay_ += pre_delay_increment_;
       const float early_feed = early_feed_ * (l + r);
+      // Both sides go through their diffusers side by side, so that the FPU
+      // is not waiting on one chain of dependent operations.
+      float v[2];
       for (size_t side = 0; side < 2; ++side) {
-        float v = Read(pre_delay_line_[side], t, pre_delay_) + early_feed;
-        for (size_t j = 0; j < kReverbNumDiffusers; ++j) {
-          const DelayLine& line = diffuser_line_[side][j];
-          const float delayed = Read(line, t, diffuser_delay_[j]);
-          const float w = v + diffuser_gain_ * delayed;
-          Write(line, t, w);
-          v = delayed - diffuser_gain_ * w;
-        }
-        if (wet_wash_ == 0.0f) {
-          // Left of noon, the long diffusers only fill up with silence, so
-          // that they fade in later without a burst of stale samples.
-          for (size_t j = 0; j < kReverbNumWashDiffusers; ++j) {
-            Write(wash_line_[side][j], t, 0.0f);
-          }
-          tank_in[side][k] = v;
-          continue;
-        }
-        float washed = v;
-        for (size_t j = 0; j < kReverbNumWashDiffusers; ++j) {
-          const DelayLine& line = wash_line_[side][j];
-          const float delayed = Read(line, t, wash_delay_[side][j]);
-          const float w = washed + wash_gain_ * delayed;
-          Write(line, t, w);
-          washed = delayed - wash_gain_ * w;
-        }
-        tank_in[side][k] = dry_wash_ * v + wet_wash_ * washed;
+        v[side] = Read(pre_delay_line_[side], t, pre_delay_) + early_feed;
       }
+      for (size_t j = 0; j < kReverbNumDiffusers; ++j) {
+        const DelayLine& line_l = diffuser_line_[0][j];
+        const DelayLine& line_r = diffuser_line_[1][j];
+        const float delayed_l = Read(line_l, t, diffuser_delay_[j]);
+        const float delayed_r = Read(line_r, t, diffuser_delay_[j]);
+        const float w_l = v[0] + diffuser_gain_ * delayed_l;
+        const float w_r = v[1] + diffuser_gain_ * delayed_r;
+        Write(line_l, t, w_l);
+        Write(line_r, t, w_r);
+        v[0] = delayed_l - diffuser_gain_ * w_l;
+        v[1] = delayed_r - diffuser_gain_ * w_r;
+      }
+      if (wet_wash_ == 0.0f) {
+        // Left of noon, the long diffusers only fill up with silence, so
+        // that they fade in later without a burst of stale samples.
+        for (size_t j = 0; j < kReverbNumWashDiffusers; ++j) {
+          Write(wash_line_[0][j], t, 0.0f);
+          Write(wash_line_[1][j], t, 0.0f);
+        }
+        tank_in[0][k] = v[0];
+        tank_in[1][k] = v[1];
+        continue;
+      }
+      float washed[2] = { v[0], v[1] };
+      for (size_t j = 0; j < kReverbNumWashDiffusers; ++j) {
+        const DelayLine& line_l = wash_line_[0][j];
+        const DelayLine& line_r = wash_line_[1][j];
+        const float delayed_l = Read(line_l, t, wash_delay_[0][j]);
+        const float delayed_r = Read(line_r, t, wash_delay_[1][j]);
+        const float w_l = washed[0] + wash_gain_ * delayed_l;
+        const float w_r = washed[1] + wash_gain_ * delayed_r;
+        Write(line_l, t, w_l);
+        Write(line_r, t, w_r);
+        washed[0] = delayed_l - wash_gain_ * w_l;
+        washed[1] = delayed_r - wash_gain_ * w_r;
+      }
+      tank_in[0][k] = dry_wash_ * v[0] + wet_wash_ * washed[0];
+      tank_in[1][k] = dry_wash_ * v[1] + wet_wash_ * washed[1];
     }
 
     // Read the tank lines. All delays are longer than a block, so the whole
@@ -1104,6 +1169,17 @@ class MorphReverb {
   float rotation_cos_[3];
   float rotation_sin_[3];
   float angle_lfo_phase_[3];
+
+  // Worked out by UpdateGlobals for the other parts of the update.
+  ReverbCharacter character_;
+  float scale_;
+  float soft_scale_;
+  float decay_per_sample_;
+  float tone_ratio_;
+  float diffusion_;
+  float smear_;
+  int32_t control_phase_;
+  float control_peak_;  // Of the input, since the last update of the ducking.
 
   int32_t stretch_;
   int32_t num_stages_;
