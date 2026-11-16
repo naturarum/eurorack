@@ -2,7 +2,7 @@
 
 Unofficial firmware for Mutable Instruments Beads. The grains sound as on stock Beads. The built-in plate reverb is replaced by one whose character moves continuously from room through hall to spring, and all its settings can be changed from the panel. Version 2 adds a stereo input to the reverb, ducking, a diffusion control that does something across its whole range, and a delay mode with clearer controls.
 
-So far it has been tested on one module. Version 2 is still in testing: until it is released, the release page has version 1.
+So far it has been tested on one module. Both versions are on the [release page](https://github.com/naturarum/eurorack/releases).
 
 ## What changed
 
