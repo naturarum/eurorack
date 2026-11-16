@@ -238,6 +238,11 @@ class Ui {
   PotController assignable_cv_pot_[MIX_PARAMETER_LAST];
   PotController main_pot_[MAIN_PARAMETER_LAST];
   int displayed_reverb_setting_;
+  
+  // Pots whose main parameter is frozen after a MEDIA or ASSIGN edit, and the
+  // time left on the flash shown when one of them is picked up again.
+  int num_pots_catching_up_;
+  int pickup_flash_;
 
   static const Leds::Color media_palette_[4];
   

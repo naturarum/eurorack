@@ -15,7 +15,7 @@ So far it has been tested on one module. Version 2 is still in testing: until it
   - **Ducking** (version 2). The tail dips while the input is loud and comes back when it gets quiet.
   - **Half rate** (version 2). At the 48 kHz qualities the reverb runs at 24 kHz, between halfband filters, and keeps everything up to about 10 kHz. TONE stops brightening at about 70%.
   - **REVERB fully down** skips the reverb once its tail has faded.
-- **Up to 24 grains at the top quality** (version 2), instead of 32. Beads has no room for 32 grains at 48 kHz plus this reverb: with big, dense grains the audio crackled. New grains take over the oldest one, as on stock Beads, only sooner. The other qualities keep 32.
+- **Up to 28 grains at the top quality** (version 2), instead of 32. Beads has no room for 32 grains at 48 kHz plus this reverb: with big, dense grains the audio crackled. New grains take over the oldest one, as on stock Beads, only sooner. The other qualities keep 32.
 - **A clearer delay mode** (version 2): TIME sets the delay time, DENSITY picks a pattern of taps, and the SEED light flashes on every repeat. See below.
 - **Synth mode is removed.** With nothing patched into the inputs, Beads no longer switches to its wavetable synth. This frees flash and CPU time for the reverb.
 - **Everything else is stock.** That covers the grains' sound, looper, CV, calibration and the saved buffer.
@@ -37,6 +37,10 @@ To edit the reverb, hold **MEDIA** (the small button with the coloured light, ju
 
 - While you turn, the MEDIA light shows the value, going from green through yellow to red.
 - When you let go, the settings are saved.
+- A knob you turned keeps its normal parameter (TIME, SIZE and so on) frozen where it was, so editing the reverb never changes your patch.
+  - While a knob is away from its parameter, the MEDIA light pulses, faster when more knobs are.
+  - Turn the knob back: when it passes the old position, the light flashes white and the knob controls its parameter again.
+  - The same goes for the small knobs after setting a CV amount with ASSIGN or the input gain with MEDIA + FEEDBACK. (Stock Beads lets the knob drag the parameter along instead.)
 - MEDIA only changes the quality setting if you press and release it without turning anything.
 - The reverb starts as a hall with about 3.3 s of decay.
 - Updating from version 1 keeps your reverb settings. The diffusion value is converted so that it sounds the same, and ducking starts off.
@@ -91,7 +95,7 @@ make -f beads/makefile wav_check
 - [`test/render_reverb.sh`](test/render_reverb.sh) renders the reverb on a computer and measures decay times and levels against the stock reverb.
 - Build options, set with `PROJECT_CONFIGURATION` (for example `PROJECT_CONFIGURATION=-DCPU_METER`). The makefile doesn't track them, so run `make -f beads/makefile clean` when you change them.
   - `-DCPU_METER`: test builds. The three ASSIGN LEDs show the peak load of the audio processing, from 70% (all off) to 100% (all on), 10% per LED. All three blink for a second after a block ran late, which is what a crackle is.
-  - `-DBEADS_TOP_QUALITY_VOICES=n`: the number of grains at the top quality, 24 by default.
+  - `-DBEADS_TOP_QUALITY_VOICES=n`: the number of grains at the top quality, 28 by default. On the test module 28 never ran late and 32 did.
   - `-DBEADS_ITCM`: runs the audio code from the H7's ITCM. Experimental: the one build that tried it didn't start. Recovery is through the audio bootloader, as above.
   - `-DBEADS_WARM_CACHES`: leaves out the dummy grain player that stock Beads runs between audio blocks. Measurement only.
 - With an ST-Link on the SWD header:

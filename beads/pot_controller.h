@@ -32,9 +32,11 @@
 //   to start modifying the hidden parameter.
 // - POT_STATE_HIDDEN_PARAMETER: the hidden parameter tracks the position of
 //   the pot.
-// - POT_STATE_CATCHING_UP: the pot adjusts the main parameter in a relative
-//   way, until the position of the pot and the value of the parameter match
-//   again.
+// - POT_STATE_CATCHING_UP: the main parameter stays frozen at the value it
+//   had before the hidden parameter was edited, until the pot reaches or
+//   crosses that position. The pot then tracks again, and caught_up() reports
+//   it once so that the UI can flash a LED. (The stock firmware adjusted the
+//   main parameter in a relative way instead, which changed the patch.)
 
 #ifndef BEADS_POT_CONTROLLER_H_
 #define BEADS_POT_CONTROLLER_H_
@@ -61,6 +63,7 @@ class PotController {
       float offset) {
     state_ = POT_STATE_TRACKING;
     was_catching_up_ = false;
+    caught_up_ = false;
 
     value_ = 0.0f;
     stored_value_ = 0.0f;
@@ -84,10 +87,24 @@ class PotController {
     return state_ == POT_STATE_HIDDEN_PARAMETER;
   }
   
+  // True while the main parameter is frozen, waiting for the pot to come
+  // back to it.
+  inline bool catching_up() const {
+    return state_ == POT_STATE_CATCHING_UP;
+  }
+  
+  // True once, when the pot has just picked its main parameter up again.
+  inline bool caught_up() {
+    bool flag = caught_up_;
+    caught_up_ = false;
+    return flag;
+  }
+  
   inline void Unlock() {
-    if (state_ == POT_STATE_HIDDEN_PARAMETER || was_catching_up_) {
+    if (state_ == POT_STATE_HIDDEN_PARAMETER ||
+        (state_ == POT_STATE_LOCKING && was_catching_up_)) {
       state_ = POT_STATE_CATCHING_UP;
-    } else {
+    } else if (state_ == POT_STATE_LOCKING) {
       state_ = POT_STATE_TRACKING;
     }
   }
@@ -111,7 +128,10 @@ class PotController {
         
       case POT_STATE_LOCKING:
         if (fabsf(value_ - previous_value_) > 0.03f) {
-          stored_value_ = previous_value_;
+          // A pot that was still catching up keeps the value it is frozen at.
+          if (!was_catching_up_) {
+            stored_value_ = previous_value_;
+          }
           hidden_parameter_ = value_;
           state_ = POT_STATE_HIDDEN_PARAMETER;
           previous_value_ = value_;
@@ -125,23 +145,18 @@ class PotController {
         
       case POT_STATE_CATCHING_UP:
         {
-          if (fabsf(value_ - previous_value_) > 0.005f) {
-            float delta = value_ - previous_value_;
-
-            float skew_ratio = delta > 0.0f
-              ? (1.001f - stored_value_) / (1.001f - previous_value_)
-              : (0.001f + stored_value_) / (0.001f + previous_value_);
-            CONSTRAIN(skew_ratio, 0.1f, 10.0f);
-        
-            stored_value_ += skew_ratio * delta;
-            CONSTRAIN(stored_value_, 0.0f, 1.0f);
-        
-            if (fabsf(stored_value_ - value_) < 0.005f) {
-              state_ = POT_STATE_TRACKING;
-            }
-            previous_value_ = value_;
-            main_parameter_ = stored_value_ * scale_ + offset_;
+          // The main parameter stays where it was before the hidden parameter
+          // was edited, until the pot reaches or crosses that position.
+          float value = value_;
+          CONSTRAIN(value, 0.0f, 1.0f);
+          const float error = value - stored_value_;
+          const float previous_error = previous_value_ - stored_value_;
+          if (fabsf(error) < 0.005f || error * previous_error < 0.0f) {
+            state_ = POT_STATE_TRACKING;
+            caught_up_ = true;
           }
+          previous_value_ = value;
+          main_parameter_ = stored_value_ * scale_ + offset_;
         }
         break;
     }
@@ -150,6 +165,7 @@ class PotController {
  private:
   PotState state_;
   bool was_catching_up_;
+  bool caught_up_;
   
   float main_parameter_;
   float hidden_parameter_;

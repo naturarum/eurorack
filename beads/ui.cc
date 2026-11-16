@@ -53,6 +53,10 @@ const uint32_t Ui::long_press_duration[SWITCH_LAST] = {
 // on the meter like the reverb settings, with this index.
 const int kDisplayDucking = REVERB_SETTING_LAST;
 
+// Length of the flash shown when a knob picks its parameter up again, in ms:
+// white for the first half, dark for the second.
+const int kPickupFlashDuration = 240;
+
 // Reverb setting edited by each large knob while MEDIA is held.
 const ReverbSetting kShiftedReverbSetting[Ui::MAIN_PARAMETER_LAST] = {
   REVERB_SETTING_DECAY,  // TIME
@@ -107,6 +111,8 @@ void Ui::Init(
     main_pot_[i].Init(1.0f, 0.0f);
   }
   displayed_reverb_setting_ = -1;
+  num_pots_catching_up_ = 0;
+  pickup_flash_ = 0;
 }
 
 void Ui::LockMainPots() {
@@ -164,9 +170,18 @@ void Ui::Poll() {
     }
   }
   
+  int num_pots_catching_up = 0;
+  if (pickup_flash_) {
+    --pickup_flash_;
+  }
+  
   for (int i = 0; i < MIX_PARAMETER_LAST; ++i) {
     PotController* p = &assignable_cv_pot_[i];
     p->ProcessUIRate();
+    num_pots_catching_up += p->catching_up();
+    if (p->caught_up()) {
+      pickup_flash_ = kPickupFlashDuration;
+    }
     if (p->editing_hidden_parameter()) {
       State* state = settings_->mutable_state();
       if (switches_.pressed(SWITCH_MEDIA)) {
@@ -190,6 +205,10 @@ void Ui::Poll() {
   for (int i = 0; i < MAIN_PARAMETER_LAST; ++i) {
     PotController* p = &main_pot_[i];
     p->ProcessUIRate();
+    num_pots_catching_up += p->catching_up();
+    if (p->caught_up()) {
+      pickup_flash_ = kPickupFlashDuration;
+    }
     if (p->editing_hidden_parameter() && switches_.pressed(SWITCH_MEDIA)) {
       // Same hack as for the manual gain.
       press_time_[SWITCH_MEDIA] = system_clock.milliseconds();
@@ -201,6 +220,7 @@ void Ui::Poll() {
       displayed_reverb_setting_ = setting;
     }
   }
+  num_pots_catching_up_ = num_pots_catching_up;
   
   UpdateLeds();
 }
@@ -267,6 +287,23 @@ void Ui::UpdateLeds() {
           const float brightness = overwrite_reserve_ * \
               (state.monophonic_mode ? 0.5f : 1.0f);
           leds_.set_media(media_color, brightness);
+          if (pickup_flash_) {
+            // A knob is back where it was before the reverb, gain or CV
+            // amount was edited with it, and controls its parameter again.
+            const Leds::Color white = { 255, 255, 255 };
+            const Leds::Color black = { 0, 0, 0 };
+            leds_.set_media(
+                pickup_flash_ > kPickupFlashDuration / 2 ? white : black);
+          } else if (num_pots_catching_up_) {
+            // Some knobs are still away from their parameter: the LED
+            // pulses, faster when more of them are.
+            int phase = (system_clock.milliseconds() * \
+                num_pots_catching_up_) & 511;
+            phase = phase >= 256 ? 511 - phase : phase;
+            leds_.set_media(
+                media_color,
+                brightness * (0.15f + 0.85f * float(phase) / 255.0f));
+          }
         }
         
         if (mode_ == MODE_DISPLAY_AUTOSAVE) {

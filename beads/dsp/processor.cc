@@ -45,7 +45,7 @@ using namespace stmlib;
 // with the reverb up overran the audio interrupt. With fewer voices, new
 // grains steal the oldest ones a little sooner, as the scheduler always does.
 #ifndef BEADS_TOP_QUALITY_VOICES
-#define BEADS_TOP_QUALITY_VOICES 24
+#define BEADS_TOP_QUALITY_VOICES 28
 #endif  // BEADS_TOP_QUALITY_VOICES
 
 void Processor::Init(
