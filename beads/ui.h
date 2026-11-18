@@ -94,6 +94,17 @@ class Ui {
     mode_ = MODE_PANIC;
   }
   
+  // Reverb-only start mode: the large knobs are the reverb, MEDIA does not
+  // change the quality, FREEZE and SEED do nothing, and the quality LED is
+  // blue. With switched set, the LED blinks for a moment in the colour of the
+  // new mode, and MEDIA is ignored until it is released: it was held at
+  // power-on to change the mode.
+  void set_start_mode(bool reverb_mode, bool switched);
+  
+  inline bool reverb_mode() const {
+    return reverb_mode_;
+  }
+  
   inline bool should_ignore_state_change() const {
     bool frozen = freeze_led_state_;
     bool calibrating = mode_ >= MODE_CALIBRATION_1 && \
@@ -243,8 +254,17 @@ class Ui {
   // time left on the flash shown when one of them is picked up again.
   int num_pots_catching_up_;
   int pickup_flash_;
+  
+  static const int kStartModeCueDuration = 1500;  // ms
+  static const int kMediaReleaseTime = 20;  // ms
+  bool reverb_mode_;
+  int start_mode_cue_;
+  // Not zero while MEDIA is still held from power-on. Counts the time it
+  // has been up.
+  int media_held_since_boot_;
 
   static const Leds::Color media_palette_[4];
+  static const Leds::Color reverb_mode_color_;
   
   DISALLOW_COPY_AND_ASSIGN(Ui);
 };

@@ -1,8 +1,8 @@
 # Beads with a morphing reverb
 
-Unofficial firmware for Mutable Instruments Beads. The grains sound as on stock Beads. The built-in plate reverb is replaced by one whose character moves continuously from room through hall to spring, and all its settings can be changed from the panel. Version 2 adds a stereo input to the reverb, ducking, a diffusion control that does something across its whole range, and a delay mode with clearer controls.
+Unofficial firmware for Mutable Instruments Beads. The grains sound as on stock Beads. The built-in plate reverb is replaced by one whose character moves continuously from room through hall to spring, and all its settings can be changed from the panel. Version 2 adds a stereo input to the reverb, ducking, a diffusion control that does something across its whole range, and a delay mode with clearer controls. Version 3 adds a reverb-only mode: hold MEDIA at power-on and the module becomes a stereo reverb, with the knobs and CV inputs on the reverb itself.
 
-So far it has been tested on one module. Both versions are on the [release page](https://github.com/naturarum/eurorack/releases).
+So far it has been tested on one module. All versions are on the [release page](https://github.com/naturarum/eurorack/releases).
 
 ## What changed
 
@@ -17,6 +17,7 @@ So far it has been tested on one module. Both versions are on the [release page]
   - **REVERB fully down** skips the reverb once its tail has faded.
 - **Up to 28 grains at the top quality** (version 2), instead of 32. Beads has no room for 32 grains at 48 kHz plus this reverb: with big, dense grains the audio crackled. New grains take over the oldest one, as on stock Beads, only sooner. The other qualities keep 32.
 - **A clearer delay mode** (version 2): TIME sets the delay time, DENSITY picks a pattern of taps, and the SEED light flashes on every repeat. See below.
+- **A reverb-only mode** (version 3), chosen at power-on. Without the grains, the reverb has the whole processor and runs at full quality. See below.
 - **Synth mode is removed.** With nothing patched into the inputs, Beads no longer switches to its wavetable synth. This frees flash and CPU time for the reverb.
 - **Everything else is stock.** That covers the grains' sound, looper, CV, calibration and the saved buffer.
 
@@ -45,6 +46,31 @@ To edit the reverb, hold **MEDIA** (the small button with the coloured light, ju
 - The reverb starts as a hall with about 3.3 s of decay.
 - Updating from version 1 keeps your reverb settings. The diffusion value is converted so that it sounds the same, and ducking starts off.
 
+## Reverb-only mode
+
+Hold **MEDIA** while you power the case on. The MEDIA light blinks blue, then stays blue: Beads is now a stereo reverb, with no grains, no recording and no delay. The module remembers the mode, so it comes back as a reverb the next time. Hold MEDIA at power-on again to go back to the grains; the light blinks in the quality colour.
+
+Don't hold FREEZE at the same time: FREEZE at power-on starts the firmware update.
+
+The knobs are the reverb, with no button to hold:
+
+| Knob | Setting | CV |
+|---|---|---|
+| SHAPE | Character, room to hall to spring | SHAPE input, through its attenuverter |
+| SIZE | Size | SIZE input, through its attenuverter |
+| TIME | Decay | TIME input, through its attenuverter |
+| PITCH | Tone | V/OCT input, through the PITCH attenuverter. Fully up, the filter follows 1 V/octave |
+| DENSITY | Diffusion | DENSITY input |
+| FEEDBACK | Pre-delay, up to 250 ms on top of the character's own | ASSIGN input, when assigned |
+| DRY/WET | Dry/wet. The last part of the travel takes the dry signal out | ASSIGN input, when assigned |
+| REVERB | Ducking | ASSIGN input, when assigned |
+
+- **Sound.** It is the same reverb with nothing saved: 48 kHz throughout, more early reflections and diffusers, and delay memory in floating point, so long tails fade without a noise floor.
+- **Attenuverters** only act when a cable is patched into their input.
+- **Input gain** is still MEDIA + FEEDBACK, and CV amounts are still set with ASSIGN + a small knob. The knob pickup works as in the normal mode, on a blue light.
+- **FREEZE, SEED** and a short press on MEDIA do nothing.
+- **Separate settings.** The reverb you set with MEDIA + knob in the normal mode is kept apart: it is back, with your quality setting and any saved buffer, when you return.
+
 ## Delay mode
 
 Turn SIZE fully clockwise for about a second and a half, as on stock Beads.
@@ -68,9 +94,9 @@ Turn SIZE fully clockwise for about a second and a half, as on stock Beads.
 
 No programmer needed. Your calibration, settings and saved buffer are kept.
 
-1. Download `beads_reverb_v2.wav` from the [release page](https://github.com/naturarum/eurorack/releases/tag/beads-reverb-v2).
+1. Download `beads_reverb_v3.wav` from the [release page](https://github.com/naturarum/eurorack/releases/tag/beads-reverb-v3).
 2. Patch your computer's audio output into **IN L**, and turn **TIME** fully counterclockwise. In update mode, TIME sets the input gain.
-3. Hold **FREEZE** while you power the case on. FREEZE and SEED start blinking alternately.
+3. Hold **FREEZE**, and only FREEZE, while you power the case on. FREEZE and SEED start blinking alternately.
 
    Don't hold ASSIGN at the same time: FREEZE + ASSIGN at power-on erases the firmware.
 4. Mute notifications and play the file. It lasts about 2 min 35 s.
@@ -92,7 +118,7 @@ make -f beads/makefile wav_check
 
 - `wav_check` writes `build/beads/beads.wav`. It then decodes the file with the bootloader's own demodulator and checks that the result matches the firmware byte for byte.
 - The encoder, [`tools/qpsk_encoder.py`](tools/qpsk_encoder.py), is a Python 3 port of Mutable Instruments' encoder. The original needs Python 2 and numpy.
-- [`test/render_reverb.sh`](test/render_reverb.sh) renders the reverb on a computer and measures decay times and levels against the stock reverb.
+- [`test/render_reverb.sh`](test/render_reverb.sh) renders the reverb on a computer and measures decay times and levels against the stock reverb. [`test/render_reverb_mode.sh`](test/render_reverb_mode.sh) does the same for the reverb-only mode.
 - Build options, set with `PROJECT_CONFIGURATION` (for example `PROJECT_CONFIGURATION=-DCPU_METER`). The makefile doesn't track them, so run `make -f beads/makefile clean` when you change them.
   - `-DCPU_METER`: test builds. The three ASSIGN LEDs show the peak load of the audio processing, from 70% (all off) to 100% (all on), 10% per LED. All three blink for a second after a block ran late, which is what a crackle is.
   - `-DBEADS_TOP_QUALITY_VOICES=n`: the number of grains at the top quality, 28 by default. On the test module 28 never ran late and 32 did.

@@ -37,6 +37,7 @@
 #include "beads/drivers/system.h"
 #include "beads/drivers/watchdog.h"
 #include "beads/dsp/processor.h"
+#include "beads/dsp/reverb_mode.h"
 #include "beads/factory_test.h"
 #include "beads/gain_control.h"
 #include "beads/normalization_detector.h"
@@ -52,7 +53,10 @@ const int kBlockRate = 4000;
 
 const bool skip_factory_test = false;
 
-uint8_t delay_buffer_1[512 * 1024] __attribute__ ((section (".ramd1")));
+// In the reverb-only start mode, the first buffer is the float delay memory
+// of the reverb.
+uint8_t delay_buffer_1[512 * 1024] __attribute__ ((section (".ramd1")))
+    __attribute__ ((aligned (4)));
 uint8_t delay_buffer_2[256 * 1024] __attribute__ ((section (".ramd2")));
 uint16_t reverb_buffer[32768] __attribute__ ((section (".ramd3")));
 
@@ -65,11 +69,15 @@ FreezeInput freeze_input;
 GainControl gain_control;
 NormalizationDetector normalization_detector;
 Processor processor;
+ReverbMode reverb_mode_processor;
 SeedInput seed_input;
 Settings settings;
 Ui ui;
 
 volatile bool ready = false;
+
+// Set at boot from the settings: the reverb alone, without the grains.
+bool reverb_mode = false;
 
 // Load of the audio interrupt, in CPU cycles per block: 100000 cycles is the
 // whole budget (400 MHz, 4000 blocks per second). Read over SWD while the
@@ -318,6 +326,176 @@ ITCM void Process(
   }
 }
 
+// The helpers below are those of the reverb-only start mode. They repeat
+// parts of Process above, which is left exactly as it was.
+
+// Normalization detection, then the knobs and CVs.
+inline void ReadControls(
+    const Codec::Event* events,
+    const Codec::Frame* in,
+    size_t size) {
+  // Normalization detection.
+  normalization_detector.Process(
+      events[size - 1],
+      in[size - 1],
+      cv_reader.cv_values());
+  
+  // CV Reading
+  cv_reader.Read();
+  for (int i = 0; i < Ui::MIX_PARAMETER_LAST; ++i) {
+    ui.ProcessPot(
+        Ui::MixParameter(i),
+        cv_reader.pot(PotsAdcChannel(POTS_ADC_CHANNEL_FEEDBACK + i)));
+  }
+  const PotsAdcChannel main_pot_channel[Ui::MAIN_PARAMETER_LAST] = {
+    POTS_ADC_CHANNEL_TIME,
+    POTS_ADC_CHANNEL_SIZE,
+    POTS_ADC_CHANNEL_SHAPE,
+    POTS_ADC_CHANNEL_PITCH,
+    POTS_ADC_CHANNEL_DENSITY
+  };
+  for (int i = 0; i < Ui::MAIN_PARAMETER_LAST; ++i) {
+    ui.ProcessMainPot(
+        Ui::MainParameter(i),
+        cv_reader.pot(main_pot_channel[i]));
+  }
+}
+
+// FEEDBACK, DRY/WET and REVERB knobs, with the assignable CV.
+inline void ReadMixParameters(float* mix_parameter) {
+  for (int i = 0; i < Ui::MIX_PARAMETER_LAST; ++i) {
+    float base = ui.mix_parameter(Ui::MixParameter(i)) * 1.005f;
+    float amount = settings.state().assignable_cv_destination == 3
+        ? float(settings.state().assignable_cv_amount[i]) / 256.0f
+        : (settings.state().assignable_cv_destination == i ? 1.0f : 0.0f);
+    mix_parameter[i] = base + \
+        (cv_reader.cv(CV_ADC_CHANNEL_ASSIGN) - 0.002f) * amount;
+    CONSTRAIN(mix_parameter[i], 0.0f, 1.0f);
+  }
+}
+
+// Conversion of output samples into integers.
+inline void WriteOutput(
+    const FloatFrame* float_out, Codec::Frame* out, size_t size) {
+  for (size_t i = 0; i < size; ++i) {
+    float l = float_out[i].l;
+    float r = float_out[i].r;
+    CONSTRAIN(l, -1.0f, 0.999999f);
+    CONSTRAIN(r, -1.0f, 0.999999f);
+    out[i].l = static_cast<int32_t>(l * 2147483648.0f);
+    out[i].r = static_cast<int32_t>(r * 2147483648.0f);
+  }
+}
+
+// Position of a large knob plus its CV, through the attenuverter. Without a
+// patch cable the attenuverter does nothing.
+inline float ReverbModeControl(
+    Ui::MainParameter parameter,
+    PotsAdcChannel attenuverter,
+    NormalizationDetectorChannel normalization_channel,
+    float cv) {
+  float value = ui.main_parameter(parameter);
+  if (!normalization_detector.normalized(normalization_channel)) {
+    value += cv_reader.pot(attenuverter) * cv;
+  }
+  CONSTRAIN(value, 0.0f, 1.0f);
+  return value;
+}
+
+// Audio callback of the reverb-only start mode: the five large knobs and
+// their CV inputs are the reverb settings that the granular mode keeps on
+// its shift layer.
+void ProcessReverbMode(
+    const Codec::Event* events,
+    const Codec::Frame* in,
+    Codec::Frame* out,
+    size_t size) {
+  ScopedCpuLoadMeter cpu_load_meter;
+  FloatFrame float_in[kMaxCodecBlockSize];
+  FloatFrame float_out[kMaxCodecBlockSize];
+
+  ReadControls(events, in, size);
+  
+  gain_control.Process(
+      !codec_transition_frames,
+      settings.state().gain,
+      normalization_detector.normalized(
+          NORMALIZATION_DETECTOR_CHANNEL_AUDIO_LEFT),
+      normalization_detector.normalized(
+          NORMALIZATION_DETECTOR_CHANNEL_AUDIO_RIGHT),
+      in,
+      float_in,
+      size);
+  if (codec_transition_frames) {
+    --codec_transition_frames;
+    Codec::Frame silence;
+    silence.l = 0;
+    silence.r = 0;
+    fill(&out[0], &out[size], silence);
+    return;
+  }
+  
+  ReverbMode::Parameters p;
+  p.reverb.decay = ReverbModeControl(
+      Ui::MAIN_PARAMETER_TIME,
+      POTS_ADC_CHANNEL_TIME_AMOUNT,
+      NORMALIZATION_DETECTOR_CHANNEL_TIME_CV,
+      cv_reader.cv(CV_ADC_CHANNEL_TIME));
+  p.reverb.size = ReverbModeControl(
+      Ui::MAIN_PARAMETER_SIZE,
+      POTS_ADC_CHANNEL_SIZE_AMOUNT,
+      NORMALIZATION_DETECTOR_CHANNEL_SIZE_CV,
+      cv_reader.cv(CV_ADC_CHANNEL_SIZE));
+  p.reverb.character = ReverbModeControl(
+      Ui::MAIN_PARAMETER_SHAPE,
+      POTS_ADC_CHANNEL_SHAPE_AMOUNT,
+      NORMALIZATION_DETECTOR_CHANNEL_SHAPE_CV,
+      cv_reader.cv(CV_ADC_CHANNEL_SHAPE));
+  // The V/OCT input is in semitones. The tone knob spans 3.32 octaves of
+  // the output filter: with the attenuverter at its maximum, the filter
+  // follows 1 V/octave.
+  p.reverb.tone = ReverbModeControl(
+      Ui::MAIN_PARAMETER_PITCH,
+      POTS_ADC_CHANNEL_PITCH_AMOUNT,
+      NORMALIZATION_DETECTOR_CHANNEL_PITCH_CV,
+      cv_reader.cv(CV_ADC_CHANNEL_PITCH) / (12.0f * 3.3219f));
+  // No attenuverter on this one.
+  p.reverb.diffusion = ui.main_parameter(Ui::MAIN_PARAMETER_DENSITY);
+  if (!normalization_detector.normalized(
+      NORMALIZATION_DETECTOR_CHANNEL_DENSITY_CV)) {
+    p.reverb.diffusion += cv_reader.cv(CV_ADC_CHANNEL_DENSITY);
+    CONSTRAIN(p.reverb.diffusion, 0.0f, 1.0f);
+  }
+
+  float mix_parameter[Ui::MIX_PARAMETER_LAST];
+  ReadMixParameters(mix_parameter);
+  p.pre_delay = mix_parameter[Ui::MIX_PARAMETER_FEEDBACK];
+  p.dry_wet = mix_parameter[Ui::MIX_PARAMETER_DRY_WET];
+  p.reverb.ducking = mix_parameter[Ui::MIX_PARAMETER_REVERB];
+  
+  reverb_mode_processor.Process(p, float_in, float_out, size);
+  
+  WriteOutput(float_out, out, size);
+}
+
+// The reverb-only start mode always runs at 48 kHz, in stereo.
+void StartReverbMode() {
+  const float kReverbModeSampleRate = 48000.0f;
+  reverb_mode_processor.Init(
+      reinterpret_cast<float*>(delay_buffer_1),
+      sizeof(delay_buffer_1) / sizeof(float),
+      kReverbModeSampleRate);
+  codec_stopped = false;
+  gain_control.Init(
+      kReverbModeSampleRate, GainControl::SOFT_CLIPPING_MODE_OFF, true);
+  normalization_detector.Init(2);
+  codec_transition_frames = kBlockRate / 4;
+  codec.Start(
+      int(kReverbModeSampleRate),
+      int(kReverbModeSampleRate) / kBlockRate,
+      &ProcessReverbMode);
+}
+
 void ConfigureAndStartCodec(bool reset_gain_control) {
   int sr = int(processor.sample_rate());
   codec_stopped = false;
@@ -406,7 +584,37 @@ void Init() {
     ui.set_factory_test(false);
     codec_stopped = true;
   }
+  
+  // MEDIA held at power-on switches between the granular mode and the
+  // reverb-only mode. The choice is saved. The button must read as pressed
+  // 16 times in a row over a few milliseconds, so that a glitch at power-on
+  // never changes the mode. The wait is a plain loop: nothing here may
+  // depend on a timer or an interrupt.
+  bool start_mode_switched = false;
+  if (!freshly_baked) {
+    start_mode_switched = true;
+    for (int i = 0; i < 16 && start_mode_switched; ++i) {
+      start_mode_switched = ui.pressed_immediate(SWITCH_MEDIA);
+      for (volatile int j = 0; j < 20000; ++j) { }
+    }
+    if (start_mode_switched) {
+      State* state = settings.mutable_state();
+      state->start_mode = state->start_mode == START_MODE_REVERB
+          ? START_MODE_GRANULAR
+          : START_MODE_REVERB;
+      settings.SaveState();
+    }
+    reverb_mode = settings.state().start_mode == START_MODE_REVERB;
+    ui.set_start_mode(reverb_mode, start_mode_switched);
+  }
   ready = true;
+  
+  if (reverb_mode) {
+    // The buffer saved in flash by FREEZE, if any, is left alone: it comes
+    // back with the granular mode.
+    StartReverbMode();
+    return;
+  }
   
   bool was_frozen = background_buffer_backup.Load();
   if (was_frozen) {
@@ -454,9 +662,13 @@ int main(void) {
 
   while (1) {
     ui.DoEvents();
-    MonitorStateChange();
-    if (!codec_stopped) {
-      background_buffer_backup.Process(ui.freeze_led_state());
+    // The reverb-only mode has one codec configuration, nothing to save to
+    // flash, and no use for the dummy grain player.
+    if (!reverb_mode) {
+      MonitorStateChange();
+      if (!codec_stopped) {
+        background_buffer_backup.Process(ui.freeze_led_state());
+      }
     }
 #ifndef BEADS_WARM_CACHES
     // Stock Beads keeps a dummy grain player busy between audio blocks, with
@@ -464,7 +676,9 @@ int main(void) {
     // steady. It also leaves the caches full of its own code and data at the
     // start of every audio block. Test builds can leave it out, to measure
     // how much time that costs the audio interrupt.
-    processor.WasteCPUCycles(16);
+    if (!reverb_mode) {
+      processor.WasteCPUCycles(16);
+    }
 #endif  // BEADS_WARM_CACHES
 #ifdef CPU_METER
     static uint32_t last_read = 0;

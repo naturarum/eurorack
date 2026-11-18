@@ -113,6 +113,17 @@ void Ui::Init(
   displayed_reverb_setting_ = -1;
   num_pots_catching_up_ = 0;
   pickup_flash_ = 0;
+  reverb_mode_ = false;
+  start_mode_cue_ = 0;
+  media_held_since_boot_ = 0;
+}
+
+void Ui::set_start_mode(bool reverb_mode, bool switched) {
+  reverb_mode_ = reverb_mode;
+  if (switched) {
+    start_mode_cue_ = kStartModeCueDuration;
+    media_held_since_boot_ = kMediaReleaseTime;
+  }
 }
 
 void Ui::LockMainPots() {
@@ -144,8 +155,26 @@ void Ui::Poll() {
   }
 #endif  // CPU_METER
   
+  if (start_mode_cue_) {
+    --start_mode_cue_;
+  }
+  if (media_held_since_boot_) {
+    // The press that changed the start mode must not do anything else. It
+    // is over once the switch has been up long enough for the debouncing
+    // to have settled.
+    if (switches_.pressed_immediate(SWITCH_MEDIA)) {
+      media_held_since_boot_ = kMediaReleaseTime;
+    } else {
+      --media_held_since_boot_;
+    }
+  }
+  
   for (int i = 0; i < SWITCH_LAST; ++i) {
     Switch s = Switch(i);
+    
+    if (i == SWITCH_MEDIA && media_held_since_boot_) {
+      continue;
+    }
     
     if (switches_.just_pressed(s)) {
       queue_.AddEvent(CONTROL_SWITCH, i, 0);
@@ -233,6 +262,10 @@ const Leds::Color Ui::media_palette_[4] = {
   { 192, 192, 208 },
 };
 
+// Blue: none of the quality colours.
+/* static */
+const Leds::Color Ui::reverb_mode_color_ = { 0, 24, 255 };
+
 void Ui::UpdateLeds() {
   leds_.Clear();
   
@@ -283,9 +316,15 @@ void Ui::UpdateLeds() {
               : state.reverb[displayed_reverb_setting_]) / 255.0f;
           leds_.set_meter(0.05f + 0.95f * value);
         } else {
-          Leds::Color media_color = media_palette_[state.media];
-          const float brightness = overwrite_reserve_ * \
-              (state.monophonic_mode ? 0.5f : 1.0f);
+          // Blue in the reverb-only mode. The knob pickup below works the
+          // same in both modes: there, FEEDBACK, DRY/WET and REVERB are the
+          // knobs that MEDIA or ASSIGN can borrow.
+          Leds::Color media_color = reverb_mode_
+              ? reverb_mode_color_
+              : media_palette_[state.media];
+          const float brightness = reverb_mode_
+              ? 1.0f
+              : overwrite_reserve_ * (state.monophonic_mode ? 0.5f : 1.0f);
           leds_.set_media(media_color, brightness);
           if (pickup_flash_) {
             // A knob is back where it was before the reverb, gain or CV
@@ -305,6 +344,17 @@ void Ui::UpdateLeds() {
                 brightness * (0.15f + 0.85f * float(phase) / 255.0f));
           }
         }
+        if (start_mode_cue_) {
+          // The start mode has just been changed: fast blink in the colour
+          // of the new mode.
+          const Leds::Color black = { 0, 0, 0 };
+          leds_.set_media(
+              (start_mode_cue_ & 64)
+                  ? (reverb_mode_
+                        ? reverb_mode_color_
+                        : media_palette_[state.media])
+                  : black);
+        }
         
         if (mode_ == MODE_DISPLAY_AUTOSAVE) {
           leds_.set(LED_FREEZE, state.disable_autosave ? 16 : 64);
@@ -315,7 +365,9 @@ void Ui::UpdateLeds() {
                   : 0);
         }
         
-        if (delay_mode_) {
+        if (reverb_mode_) {
+          leds_.set(LED_SEED, 0);
+        } else if (delay_mode_) {
           // A flash on every repeat. Between flashes, dim when the delay
           // runs free (SEED locked), off when it follows taps or a clock.
           int brightness = seed_button_locked_ ? 24 : 0;
@@ -343,6 +395,11 @@ void Ui::UpdateLeds() {
         } else {
           for (int i = 0; i < 3; ++i) {
             float level = (cpu_load_ - 0.7f - 0.1f * float(i)) * 10.0f;
+            if (reverb_mode_) {
+              // The load of the reverb alone is not known yet: the bar
+              // covers the whole range, a third per LED.
+              level = cpu_load_ * 3.0f - float(i);
+            }
             CONSTRAIN(level, 0.0f, 1.0f);
             leds_.set(Led(LED_ASSIGN_1 + i), uint8_t(level * 255.0f));
           }
@@ -383,6 +440,13 @@ void Ui::FlushEvents() {
 }
 
 void Ui::OnSwitchPressed(const Event& e) {
+  // In reverb mode FREEZE and SEED do nothing, alone or in a combination:
+  // there is no buffer to freeze or to save, and no grain to seed.
+  if (reverb_mode_ &&
+      (e.control_id == SWITCH_FREEZE || e.control_id == SWITCH_SEED)) {
+    return;
+  }
+  
   // Combo
   //
   // SEED + FREEZE = seed lock.
@@ -487,8 +551,10 @@ void Ui::OnSwitchPressed(const Event& e) {
       
     case SWITCH_MEDIA:
       assignable_cv_pot_[MIX_PARAMETER_FEEDBACK].Lock();
-      // During calibration, MEDIA only steps through the procedure.
-      if (mode_ < MODE_CALIBRATION_1 || mode_ > MODE_CALIBRATION_4) {
+      // During calibration, MEDIA only steps through the procedure. In
+      // reverb mode there is no shift layer: the knobs are the reverb.
+      if ((mode_ < MODE_CALIBRATION_1 || mode_ > MODE_CALIBRATION_4) &&
+          !reverb_mode_) {
         assignable_cv_pot_[MIX_PARAMETER_REVERB].Lock();
         LockMainPots();
       }
@@ -539,6 +605,11 @@ void Ui::NextCalibrationStep() {
 }
 
 void Ui::OnSwitchReleased(const Event& e) {
+  if (reverb_mode_ &&
+      (e.control_id == SWITCH_FREEZE || e.control_id == SWITCH_SEED)) {
+    return;
+  }
+  
   switch (e.control_id) {
     case SWITCH_SEED:
       {
@@ -570,7 +641,8 @@ void Ui::OnSwitchReleased(const Event& e) {
                 settings_->SaveState();
               }
               gain_control_->Restart();
-            } else {
+            } else if (!reverb_mode_) {
+              // The quality belongs to the granular mode.
               State* state = settings_->mutable_state();
               state->media = (state->media + 3) % 4;
               settings_->SaveState();

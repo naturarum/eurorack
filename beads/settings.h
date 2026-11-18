@@ -57,6 +57,13 @@ enum ReverbSetting {
   REVERB_SETTING_LAST
 };
 
+// What the module is when it starts. Changed by holding MEDIA at power-on.
+enum StartMode {
+  START_MODE_GRANULAR,
+  START_MODE_REVERB,
+  START_MODE_LAST
+};
+
 struct State {
   uint8_t media;
   uint8_t assignable_cv_destination;
@@ -69,7 +76,9 @@ struct State {
   uint8_t reverb[REVERB_SETTING_LAST];
   uint8_t reverb_version;  // 0 when saved by a firmware without the above.
   uint8_t reverb_ducking;  // Since version 2.
-  uint8_t padding[7];
+  // Taken from the padding, which older firmwares save as zeros: granular.
+  uint8_t start_mode;
+  uint8_t padding[6];
   enum { tag = 0x54415453 };  // STAT
 };
 

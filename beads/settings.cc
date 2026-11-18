@@ -106,6 +106,7 @@ bool Settings::Init(bool recovery_mode) {
        &state_.reverb[0]);
   state_.reverb_version = kReverbVersion;
   state_.reverb_ducking = 0;
+  state_.start_mode = START_MODE_GRANULAR;
   
   if (recovery_mode) {
     chunk_storage_.Recover(&persistent_data_, &state_);
@@ -117,6 +118,9 @@ bool Settings::Init(bool recovery_mode) {
     // Sanitize settings read from flash.
     CONSTRAIN(state_.media, 0, 3);
     CONSTRAIN(state_.assignable_cv_destination, 0, 3);
+    if (state_.start_mode >= START_MODE_LAST) {
+      state_.start_mode = START_MODE_GRANULAR;
+    }
     if (state_.reverb_version == 1) {
       // Keep the sound saved by the first version.
       state_.reverb[REVERB_SETTING_DIFFUSION] = ConvertDiffusionFromVersion1(
